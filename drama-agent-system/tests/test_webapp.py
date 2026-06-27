@@ -2064,8 +2064,8 @@ def test_script_reader_uses_chinese_article_typography():
     assert "data-conversation-new" in template
     assert "data-conversation-sidebar" in template
     assert "data-conversation-more" in template
-    assert "styles.css') }}?v=20260627b" in template
-    assert "script_reader.js') }}?v=20260627b" in template
+    assert "styles.css') }}?v=20260627c" in template
+    assert "script_reader.js') }}?v=20260627c" in template
     assert "data-conversation-list" in template
     assert "data-selection-card" in template
     assert "data-selection-summary" in template
@@ -2128,6 +2128,26 @@ def test_composer_send_button_is_compact_inside_textarea():
     assert "position: absolute;" in send_rule
     assert "Enter 发送，Shift + Enter 换行" in template
     assert 'event.key === "Enter" && !event.shiftKey' in reader_script
+
+
+def test_selected_message_renders_attachment_and_clears_before_request():
+    styles = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "styles.css").read_text(encoding="utf-8")
+    reader_script = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "script_reader.js").read_text(encoding="utf-8")
+
+    assert "let isSendingAssistantMessage = false;" in reader_script
+    assert "function setComposerSending(isSending)" in reader_script
+    assert "function renderSelectionAttachment(container, selection)" in reader_script
+    assert 'addMessage("user", message, null, selectionForMessage)' in reader_script
+    assert ".script-rag-selection-attachment" in styles
+    assert ".script-rag-send:disabled" in styles
+
+    ask_agent_block = reader_script[
+        reader_script.index("async function askAgent()") : reader_script.index("async function sendAssistantMessage")
+    ]
+    assert "if (isSendingAssistantMessage)" in ask_agent_block
+    assert ask_agent_block.index('ragComposer.value = "";') < ask_agent_block.index(
+        "await sendAssistantMessage"
+    )
 
 
 def test_timeline_api_can_force_rebuild_existing_timeline(tmp_path):

@@ -1591,6 +1591,28 @@ h1 {
   white-space: pre-wrap;
 }
 
+.script-rag-selection-attachment {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 8px;
+  border: 1px solid rgba(25, 117, 74, 0.18);
+  border-radius: 8px;
+  background: #f4fbf7;
+  color: #28423a;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.script-rag-selection-attachment strong {
+  color: #08713d;
+  font-size: 12px;
+}
+
+.script-rag-selection-attachment span {
+  color: #43534d;
+}
+
 .script-rag-message textarea,
 .script-rag-composer textarea {
   width: 100%;
@@ -1624,6 +1646,11 @@ h1 {
   padding: 12px 82px 40px 12px;
 }
 
+.script-rag-composer textarea:disabled {
+  background: #f6f8f7;
+  color: #6d7772;
+}
+
 .script-rag-send {
   position: absolute;
   right: 10px;
@@ -1643,6 +1670,15 @@ h1 {
 
 .script-rag-send:hover {
   background: #16212b;
+}
+
+.script-rag-send:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.script-rag-send:disabled:hover {
+  background: #26323d;
 }
 
 .script-rag-composer small {

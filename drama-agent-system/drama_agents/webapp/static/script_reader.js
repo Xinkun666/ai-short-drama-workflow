@@ -38,6 +38,7 @@
   let selectedSelection = null;
   let pendingSelectionIntent = "";
   let isPointerSelecting = false;
+  let isSendingAssistantMessage = false;
   let historyRequestToken = 0;
 
   function setEditMode(enabled) {
@@ -131,6 +132,35 @@
     return `${selectionQuoteStart}${selection.text}${selectionQuoteEnd}`;
   }
 
+  function setComposerSending(isSending) {
+    isSendingAssistantMessage = isSending;
+    ragComposer.disabled = isSending;
+    ragAsk.disabled = isSending;
+  }
+
+  function selectionParagraphLabel(selection) {
+    if (!selection || !selection.paragraph_id) {
+      return "跨段文本";
+    }
+    return `第 ${selection.paragraph_id.replace("script-paragraph-", "")} 段`;
+  }
+
+  function renderSelectionAttachment(container, selection) {
+    if (!selection || !selection.text) {
+      return;
+    }
+    const attachment = document.createElement("div");
+    attachment.className = "script-rag-selection-attachment";
+    const label = document.createElement("strong");
+    label.textContent = `已附带选区：${selectionParagraphLabel(selection)} / ${selection.text.length} 字`;
+    const preview = document.createElement("span");
+    const normalizedText = selection.text.replace(/\s+/g, " ").trim();
+    preview.textContent = normalizedText.length > 96 ? `${normalizedText.slice(0, 96)}...` : normalizedText;
+    attachment.appendChild(label);
+    attachment.appendChild(preview);
+    container.appendChild(attachment);
+  }
+
   function composerHasSelectionQuote() {
     return ragComposer.value.trimStart().startsWith(selectionQuoteStart);
   }
@@ -209,9 +239,12 @@
     ragStatus.textContent = "";
   }
 
-  function addMessage(role, content, result) {
+  function addMessage(role, content, result, selection) {
     const message = document.createElement("div");
     message.className = `script-rag-message ${role}`;
+    if (role === "user") {
+      renderSelectionAttachment(message, selection);
+    }
     const paragraph = document.createElement("p");
     paragraph.textContent = content;
     message.appendChild(paragraph);
@@ -270,7 +303,7 @@
       addMessage(message.role, message.content, {
         replacement: message.replacement || "",
         patch_id: message.patch_id || null,
-      });
+      }, message.selection || null);
     });
   }
 
@@ -506,6 +539,9 @@
   }
 
   async function askAgent() {
+    if (isSendingAssistantMessage) {
+      return;
+    }
     const submission = parseComposerSubmission();
     const instruction = submission.message.trim();
     const intentHint = pendingSelectionIntent;
@@ -516,54 +552,64 @@
     }
     pendingSelectionIntent = "";
     ragComposer.placeholder = defaultComposerPlaceholder;
-    await sendAssistantMessage(instruction, intentHint, selectionForMessage);
     ragComposer.value = "";
     autoResizeComposer();
+    await sendAssistantMessage(instruction, intentHint, selectionForMessage);
   }
 
   async function sendAssistantMessage(message, intentHint, selectionForMessage, patchId) {
-    const conversationId = await ensureConversation();
-    if (!conversationId) {
+    if (isSendingAssistantMessage) {
       return;
     }
-    const body = { conversation_id: conversationId, message };
-    if (intentHint) {
-      body.intent_hint = intentHint;
-    }
-    if (selectionForMessage) {
-      body.selection = selectionForMessage;
-    }
-    if (patchId) {
-      body.patch_id = patchId;
-    }
-    addMessage("user", message);
-    ragStatus.textContent = intentHint === "chat" ? "正在回复..." : "正在调用剧本对话助手...";
-    const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/assist`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const payload = await response.json();
-    if (!response.ok && !payload.result) {
-      ragStatus.textContent = payload.error || "剧本对话助手调用失败";
-      return;
-    }
-    if (payload.conversation) {
-      currentConversationId = payload.conversation.conversation_id;
-      conversationTitle.textContent = payload.conversation.title || "新对话";
-    }
-    const result = payload.result || {};
-    addMessage("assistant", result.answer || "已处理。", result);
-    await refreshConversationList();
-    if (result.applied) {
-      ragStatus.textContent = "已保存修改，正在刷新正文...";
-      window.setTimeout(() => window.location.reload(), 450);
-      return;
-    }
-    if (response.ok) {
-      ragStatus.textContent = `已参考 ${(payload.contexts || []).length} 个本地片段`;
-    } else {
-      ragStatus.textContent = result.answer || "剧本对话助手调用失败";
+    setComposerSending(true);
+    try {
+      const conversationId = await ensureConversation();
+      if (!conversationId) {
+        return;
+      }
+      const body = { conversation_id: conversationId, message };
+      if (intentHint) {
+        body.intent_hint = intentHint;
+      }
+      if (selectionForMessage) {
+        body.selection = selectionForMessage;
+      }
+      if (patchId) {
+        body.patch_id = patchId;
+      }
+      addMessage("user", message, null, selectionForMessage);
+      ragStatus.textContent = intentHint === "chat" ? "正在回复..." : "正在调用剧本对话助手...";
+      const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/assist`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const payload = await response.json();
+      if (!response.ok && !payload.result) {
+        ragStatus.textContent = payload.error || "剧本对话助手调用失败";
+        return;
+      }
+      if (payload.conversation) {
+        currentConversationId = payload.conversation.conversation_id;
+        conversationTitle.textContent = payload.conversation.title || "新对话";
+      }
+      const result = payload.result || {};
+      addMessage("assistant", result.answer || "已处理。", result);
+      await refreshConversationList();
+      if (result.applied) {
+        ragStatus.textContent = "已保存修改，正在刷新正文...";
+        window.setTimeout(() => window.location.reload(), 450);
+        return;
+      }
+      if (response.ok) {
+        ragStatus.textContent = `已参考 ${(payload.contexts || []).length} 个本地片段`;
+      } else {
+        ragStatus.textContent = result.answer || "剧本对话助手调用失败";
+      }
+    } catch (error) {
+      ragStatus.textContent = "剧本对话助手调用失败，请稍后重试。";
+    } finally {
+      setComposerSending(false);
     }
   }
 
