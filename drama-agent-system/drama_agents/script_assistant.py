@@ -983,7 +983,23 @@ def has_edit_marker(compact: str) -> bool:
 
 
 def has_review_marker(compact: str) -> bool:
-    return any(marker in compact for marker in ("评审", "审查", "哪里不好", "有什么问题", "问题在哪", "帮我看看"))
+    return any(
+        marker in compact
+        for marker in (
+            "评审",
+            "审查",
+            "哪里不好",
+            "有什么问题",
+            "问题在哪",
+            "帮我看看",
+            "看一下",
+            "看下",
+            "你看看",
+            "先看",
+            "看看这段",
+            "看这一段",
+        )
+    )
 
 
 def has_explain_marker(compact: str) -> bool:

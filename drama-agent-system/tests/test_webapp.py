@@ -865,6 +865,37 @@ def test_selection_explain_does_not_create_patch(tmp_path):
     assert count_script_edit_patches(tmp_path / "outputs" / "material_workstation.sqlite3", generation["generation_id"]) == 0
 
 
+def test_selection_look_at_this_uses_selected_context(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "你先看一下这一段",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "REVIEW_SELECTION"
+    assert "你好，我在" not in payload["result"]["answer"]
+    assert provider.edit_payload["selection"] == "智人开局，装备一般"
+    assert provider.edit_payload["intent"] == "REVIEW_SELECTION"
+
+
 def test_review_selection_does_not_create_patch(tmp_path):
     library = tmp_path / "资料库"
     library.mkdir()
