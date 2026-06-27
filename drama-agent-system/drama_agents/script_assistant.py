@@ -28,6 +28,46 @@ COMPARE_CURRENT_AND_NEW = "COMPARE_CURRENT_AND_NEW"
 ASK_CLARIFICATION = "ASK_CLARIFICATION"
 
 
+ASSISTANT_TOOL_MANIFEST = (
+    {
+        "name": "plain_chat",
+        "description": "普通问候、功能说明或不依赖选区的轻量对话；不检索 RAG，不生成候选修改。",
+        "creates_patch": False,
+        "can_persist": False,
+    },
+    {
+        "name": "chat_with_selection",
+        "description": "围绕当前选区做理解、解释、评价、节奏建议；默认不检索 RAG，不生成候选修改。",
+        "creates_patch": False,
+        "can_persist": False,
+    },
+    {
+        "name": "search_sources",
+        "description": "用户询问史实、来源、依据或资料支持时检索本地 RAG 并回答。",
+        "creates_patch": False,
+        "can_persist": False,
+    },
+    {
+        "name": "propose_edit",
+        "description": "用户明确要求改写、润色、调整或补充选区时检索本地 RAG 并生成待确认候选修改。",
+        "creates_patch": True,
+        "can_persist": False,
+    },
+    {
+        "name": "apply_patch",
+        "description": "用户明确确认某条候选修改时，由本地工具保存正文。",
+        "creates_patch": False,
+        "can_persist": True,
+    },
+    {
+        "name": "reject_patch",
+        "description": "用户放弃候选修改时，由本地工具关闭 pending patch。",
+        "creates_patch": False,
+        "can_persist": True,
+    },
+)
+
+
 @dataclass(frozen=True)
 class AssistantSelection:
     text: str = ""
@@ -47,6 +87,16 @@ class AssistantRequest:
     conversation_id: str = ""
     intent_hint: str = ""
     patch_id: int | None = None
+
+
+@dataclass(frozen=True)
+class AssistantPlan:
+    intent: str
+    tool: str = ""
+    needs_rag: bool | None = None
+    selection_policy: str = ""
+    reason: str = ""
+    source: str = "fallback"
 
 
 @dataclass(frozen=True)
@@ -306,7 +356,7 @@ class ScriptAssistantController:
         article_hash = article_version_hash(article)
         memory = ScriptAssistantMemory(self.database, generation_id, conversation)
         active_patch = memory.active_patch()
-        intent = self.router.classify(
+        fallback_intent = self.router.classify(
             message=request.message,
             selection=request.selection,
             intent_hint=request.intent_hint,
@@ -318,6 +368,15 @@ class ScriptAssistantController:
             conversation_id=conversation["conversation_id"],
             limit=12,
         )
+        plan = self._plan_request(
+            request=request,
+            generation=generation,
+            conversation=conversation,
+            recent_messages=recent_messages,
+            active_patch=active_patch,
+            fallback_intent=fallback_intent,
+        )
+        intent = plan.intent
         focus = self.focus_resolver.resolve(
             current_selection=selection_from_conversation(conversation),
             new_selection=request.selection,
@@ -458,7 +517,13 @@ class ScriptAssistantController:
             )
             return self._payload(result, [], memory.state), 200
 
-        contexts = self._contexts_for_intent(intent, request.message, effective_selection, generation)
+        contexts = self._contexts_for_intent(
+            intent,
+            request.message,
+            effective_selection,
+            generation,
+            needs_rag=plan.needs_rag,
+        )
         try:
             result = self.script_agent.assist_edit(
                 generation=generation,
@@ -522,8 +587,12 @@ class ScriptAssistantController:
         message: str,
         selection: AssistantSelection,
         generation: dict[str, Any],
+        *,
+        needs_rag: bool | None = None,
     ) -> list[dict[str, Any]]:
-        if not intent_needs_rag(intent, message):
+        if needs_rag is False:
+            return []
+        if needs_rag is None and not intent_needs_rag(intent, message):
             return []
         record_ids = [str(record_id) for record_id in generation.get("selected_record_ids") or []]
         query_text = f"{selection.text}\n{message}".strip()
@@ -534,6 +603,43 @@ class ScriptAssistantController:
             store.replace_record_chunks(record_ids, chunks)
             contexts = store.search(query_text, record_ids=record_ids, limit=6)
         return contexts
+
+    def _plan_request(
+        self,
+        *,
+        request: AssistantRequest,
+        generation: dict[str, Any],
+        conversation: dict[str, Any],
+        recent_messages: list[dict[str, Any]],
+        active_patch: dict[str, Any] | None,
+        fallback_intent: str,
+    ) -> AssistantPlan:
+        payload = {
+            "message": request.message,
+            "selection": selection_to_dict(request.selection),
+            "current_selection": selection_to_dict(selection_from_conversation(conversation)),
+            "intent_hint": request.intent_hint,
+            "patch_id": request.patch_id,
+            "has_active_patch": bool(active_patch),
+            "active_patch": summarize_active_patch(active_patch),
+            "available_tools": assistant_tool_manifest(),
+            "conversation": recent_messages,
+            "topic": generation.get("topic", ""),
+            "time_range": generation.get("time_range", ""),
+            "script_title": (generation.get("script") or {}).get("title", ""),
+        }
+        try:
+            raw_plan = self.script_agent.plan_assist(payload)
+        except (RuntimeError, ValueError, TypeError, KeyError):
+            raw_plan = None
+        if raw_plan:
+            return normalize_assistant_plan(
+                raw_plan,
+                fallback_intent=fallback_intent,
+                has_selection=bool(request.selection.text.strip()),
+                has_active_patch=bool(active_patch),
+            )
+        return AssistantPlan(intent=fallback_intent, source="fallback", reason="keyword fallback")
 
     def _apply_patch(
         self,
@@ -675,6 +781,87 @@ class ScriptAssistantController:
                 "active_selection_id": state.get("active_selection_id"),
             },
         }
+
+
+def normalize_assistant_plan(
+    raw_plan: dict[str, Any],
+    *,
+    fallback_intent: str,
+    has_selection: bool,
+    has_active_patch: bool,
+) -> AssistantPlan:
+    if not isinstance(raw_plan, dict):
+        return AssistantPlan(intent=fallback_intent, source="fallback", reason="invalid planner payload")
+    raw_intent = str(raw_plan.get("intent") or raw_plan.get("action") or raw_plan.get("tool") or "")
+    raw_tool = str(raw_plan.get("tool") or raw_plan.get("action") or "")
+    should_create_patch = parse_optional_bool(raw_plan.get("should_create_patch"))
+    intent = plan_intent_to_controller_intent(raw_intent or raw_tool, fallback_intent, has_selection)
+    if should_create_patch is True and intent not in {APPLY_PATCH, REJECT_PATCH, REVISE_PENDING}:
+        intent = PROPOSE_EDIT
+    if intent == REVISE_PENDING and not has_active_patch:
+        intent = PROPOSE_EDIT if has_selection else fallback_intent
+    return AssistantPlan(
+        intent=intent,
+        tool=normalize_plan_token(raw_tool),
+        needs_rag=parse_optional_bool(raw_plan.get("needs_rag")),
+        selection_policy=normalize_plan_token(str(raw_plan.get("selection_policy") or "")),
+        reason=str(raw_plan.get("reason") or "").strip(),
+        source="planner",
+    )
+
+
+def plan_intent_to_controller_intent(raw_intent: str, fallback_intent: str, has_selection: bool) -> str:
+    token = normalize_plan_token(raw_intent)
+    if token in {"smalltalk", "plain_chat", "chat", "general_chat"}:
+        return SMALLTALK
+    if token in {"review", "review_script", "review_selection", "chat_with_selection", "quality_review"}:
+        return REVIEW_SELECTION if has_selection else REVIEW_SCRIPT
+    if token in {"explain", "explain_script", "explain_selection", "understand_selection"}:
+        return EXPLAIN_SELECTION if has_selection else EXPLAIN_SCRIPT
+    if token in {"edit", "rewrite", "modify", "polish", "propose_edit", "edit_selection"}:
+        return PROPOSE_EDIT
+    if token in {"revise", "revise_pending", "revise_patch"}:
+        return REVISE_PENDING
+    if token in {"source", "ask_source", "search_sources", "verify_source", "check_source"}:
+        return ASK_SOURCE
+    if token in {"apply", "apply_patch"}:
+        return APPLY_PATCH
+    if token in {"reject", "reject_patch"}:
+        return REJECT_PATCH
+    return fallback_intent
+
+
+def normalize_plan_token(value: str) -> str:
+    return re.sub(r"[^a-z0-9_\u4e00-\u9fff]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def parse_optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        compact = value.strip().lower()
+        if compact in {"true", "1", "yes", "y", "需要", "是"}:
+            return True
+        if compact in {"false", "0", "no", "n", "不需要", "否"}:
+            return False
+    return None
+
+
+def summarize_active_patch(active_patch: dict[str, Any] | None) -> dict[str, Any]:
+    if not active_patch:
+        return {}
+    return {
+        "patch_id": active_patch.get("patch_id"),
+        "selection": str(active_patch.get("selection") or "")[:500],
+        "replacement": str(active_patch.get("replacement") or "")[:500],
+        "status": active_patch.get("status"),
+    }
+
+
+def assistant_tool_manifest() -> list[dict[str, Any]]:
+    return [dict(tool) for tool in ASSISTANT_TOOL_MANIFEST]
 
 
 def normalize_assist_request(payload: dict[str, Any]) -> AssistantRequest:

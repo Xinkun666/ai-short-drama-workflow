@@ -115,6 +115,11 @@ class ScriptAgent:
         database.save_script_generation(result)
         return result
 
+    def plan_assist(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        if not self.provider or not hasattr(self.provider, "plan_assistant_action"):
+            return None
+        return self.provider.plan_assistant_action(payload)
+
     def assist_edit(
         self,
         *,
@@ -207,12 +212,23 @@ class DeepSeekScriptProvider:
             max_tokens=int(os.environ.get("SCRIPT_AGENT_MAX_TOKENS", "14000")),
         )
 
+    def plan_assistant_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._complete_json(
+            system=(
+                "你是剧本对话助手的 Planner Agent，只负责理解用户自然语言并选择工具。"
+                "你不能改写正文，不能保存正文，只输出合法 JSON。"
+            ),
+            prompt=build_assistant_planner_prompt(payload),
+            temperature=0.05,
+            max_tokens=int(os.environ.get("SCRIPT_ASSISTANT_PLANNER_MAX_TOKENS", "1200")),
+        )
+
     def edit_selection(self, payload: dict[str, Any]) -> dict[str, Any]:
         intent = str(payload.get("intent") or "")
         return self._complete_json(
             system=(
                 "你是剧本阅读、评审、修改对话助手，使用 DeepSeek V4 Pro 风格能力工作。"
-                "后端已经完成意图识别，你只能执行指定任务，不能自行决定保存正文。"
+                "Planner Agent 已经完成意图理解并选择任务，你只能执行指定任务，不能自行决定保存正文。"
                 "只输出合法 JSON。"
             ),
             prompt=build_assistant_prompt(payload, intent=intent),
@@ -672,6 +688,62 @@ def build_revision_prompt(source_payload: dict[str, Any], draft: dict[str, Any],
 
 审查意见：
 {review_text}
+""".strip()
+
+
+def build_assistant_planner_prompt(payload: dict[str, Any]) -> str:
+    selection = payload.get("selection") or {}
+    current_selection = payload.get("current_selection") or {}
+    active_patch = payload.get("active_patch") or {}
+    available_tools = payload.get("available_tools") or []
+    conversation_text = json.dumps(compact_conversation(payload.get("conversation", [])), ensure_ascii=False, indent=2)
+    return f"""
+你是剧本对话助手的 Planner Agent。你的唯一任务是理解用户这一次自然语言请求，并选择后端工具。
+
+重要边界：
+1. 你只输出计划 JSON，不回答用户，不改写正文，不保存正文。
+2. 用户只是让你理解、解释、评价、问“怎么样/如何/够不够抓人”时，选择 chat_with_selection，不默认检索 RAG。
+3. 用户明确要求改写、润色、调整、补充、变得更抓人时，选择 propose_edit，并需要 RAG；后端只会生成候选修改，不会自动保存。
+4. 用户问史实、出处、依据、资料是否支持时，选择 search_sources，并需要 RAG。
+5. 用户明确应用或放弃候选修改时，选择 apply_patch 或 reject_patch；保存必须由本地工具完成。
+6. 如果用户只是问候或问功能，选择 plain_chat。
+
+可用工具：
+{json.dumps(available_tools, ensure_ascii=False, indent=2)}
+
+输出严格 JSON object：
+{{
+  "intent": "smalltalk | explain_selection | review_selection | ask_source | propose_edit | revise_pending | apply_patch | reject_patch",
+  "tool": "plain_chat | chat_with_selection | search_sources | propose_edit | apply_patch | reject_patch",
+  "needs_rag": false,
+  "should_create_patch": false,
+  "selection_policy": "use_current_selection | keep_current | no_selection",
+  "reason": "一句话说明判断依据"
+}}
+
+判断例子：
+- 有选区，用户说“这段写得怎么样 / 这段如何 / 你觉得这个开头够抓人吗”：intent=review_selection, tool=chat_with_selection, needs_rag=false, should_create_patch=false。
+- 有选区，用户说“解释这段 / 这段什么意思”：intent=explain_selection, tool=chat_with_selection, needs_rag=false。
+- 有选区，用户说“帮我润色 / 改得更抓人 / 重新写一下”：intent=propose_edit, tool=propose_edit, needs_rag=true, should_create_patch=true。
+- 用户说“这句有依据吗 / 史实可靠吗 / 来源是什么”：intent=ask_source, tool=search_sources, needs_rag=true。
+
+用户消息：
+{payload.get("message", "")}
+
+本次选区：
+{json.dumps(selection, ensure_ascii=False, indent=2)}
+
+当前对话已有焦点选区：
+{json.dumps(current_selection, ensure_ascii=False, indent=2)}
+
+待确认候选修改：
+{json.dumps(active_patch, ensure_ascii=False, indent=2)}
+
+显式按钮/前端 hint：
+{payload.get("intent_hint", "")}
+
+最近对话：
+{conversation_text}
 """.strip()
 
 

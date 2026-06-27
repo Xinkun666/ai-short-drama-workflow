@@ -184,6 +184,17 @@ class FakeScriptProvider:
         }
 
 
+class PlanningScriptProvider(FakeScriptProvider):
+    def __init__(self, plan):
+        super().__init__()
+        self.plan = plan
+        self.plan_payload = None
+
+    def plan_assistant_action(self, payload):
+        self.plan_payload = payload
+        return self.plan
+
+
 def test_homepage_renders_material_prep_workspace(tmp_path):
     app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
     client = app.test_client()
@@ -927,6 +938,108 @@ def test_selection_general_quality_question_uses_selected_context(tmp_path):
         assert "你好，我在" not in payload["result"]["answer"]
         assert provider.edit_payload["selection"] == "智人开局，装备一般"
         assert provider.edit_payload["intent"] == "REVIEW_SELECTION"
+
+
+def test_planner_handles_natural_selection_chat_without_rag(tmp_path, monkeypatch):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = PlanningScriptProvider(
+        {
+            "intent": "review_selection",
+            "tool": "chat_with_selection",
+            "needs_rag": False,
+            "selection_policy": "use_current_selection",
+            "reason": "用户在询问选中段落开头是否抓人，只需要理解和评价选区。",
+        }
+    )
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    def fail_search(*args, **kwargs):
+        raise AssertionError("planner said this turn should not call RAG")
+
+    monkeypatch.setattr(LocalVectorStore, "search", fail_search)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "你觉得这个开头够抓人吗？",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "REVIEW_SELECTION"
+    assert payload["result"]["replacement"] == ""
+    assert payload["result"]["patch_id"] is None
+    assert payload["contexts"] == []
+    assert provider.plan_payload["message"] == "你觉得这个开头够抓人吗？"
+    assert provider.plan_payload["selection"]["text"] == "智人开局，装备一般"
+    assert {tool["name"] for tool in provider.plan_payload["available_tools"]} == {
+        "plain_chat",
+        "chat_with_selection",
+        "search_sources",
+        "propose_edit",
+        "apply_patch",
+        "reject_patch",
+    }
+    assert provider.edit_payload["intent"] == "REVIEW_SELECTION"
+    assert provider.edit_payload["contexts"] == []
+    assert count_script_edit_patches(tmp_path / "outputs" / "material_workstation.sqlite3", generation["generation_id"]) == 0
+
+
+def test_planner_edit_turn_uses_rag_and_creates_pending_patch(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = PlanningScriptProvider(
+        {
+            "intent": "propose_edit",
+            "tool": "propose_edit",
+            "needs_rag": True,
+            "selection_policy": "use_current_selection",
+            "reason": "用户要求把选中段落改得更抓人，需要检索材料并生成候选修改。",
+        }
+    )
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    build_response = client.post(f"/api/script/generations/{generation['generation_id']}/rag/build")
+    assert build_response.status_code == 200
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "这里能不能更抓人一点？",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "PROPOSE_EDIT"
+    assert payload["result"]["needs_confirmation"] is True
+    assert payload["result"]["patch_id"]
+    assert payload["contexts"]
+    assert "DeepSeek 整理后的自然正文" in provider.edit_payload["contexts"][0]["text"]
+    assert provider.edit_payload["intent"] == "PROPOSE_EDIT"
+    assert provider.edit_payload["selection"] == "智人开局，装备一般"
 
 
 def test_review_selection_does_not_create_patch(tmp_path):
