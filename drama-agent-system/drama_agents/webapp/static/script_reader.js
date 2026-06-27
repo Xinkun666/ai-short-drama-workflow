@@ -17,8 +17,8 @@
   const ragStatus = root.querySelector("[data-rag-status]");
   const conversationTitle = root.querySelector("[data-conversation-title]");
   const conversationNew = root.querySelector("[data-conversation-new]");
-  const conversationToggle = root.querySelector("[data-conversation-toggle]");
   const conversationList = root.querySelector("[data-conversation-list]");
+  const conversationMore = root.querySelector("[data-conversation-more]");
   const selectionCard = root.querySelector("[data-selection-card]");
   const selectionSummary = root.querySelector("[data-selection-summary]");
   const selectionExplain = root.querySelector("[data-selection-explain]");
@@ -29,8 +29,11 @@
   const selectionClear = root.querySelector("[data-selection-clear]");
   const initialChatHtml = ragChat.innerHTML;
   const defaultComposerPlaceholder = ragComposer.getAttribute("placeholder") || "";
+  const selectionQuoteStart = "【选中的剧本文字】\n";
+  const selectionQuoteEnd = "\n【你的问题或修改要求】\n";
   let currentConversationId = "";
   let conversations = [];
+  let conversationsExpanded = false;
   let selectedText = "";
   let selectedSelection = null;
   let pendingSelectionIntent = "";
@@ -102,6 +105,7 @@
     pendingSelectionIntent = "";
     ragComposer.placeholder = defaultComposerPlaceholder;
     renderSelectionCard();
+    insertSelectionIntoComposer(nextSelection);
   }
 
   function syncSelectionAfterPointerUp() {
@@ -123,11 +127,74 @@
     selectionCard.hidden = false;
   }
 
+  function formatSelectionQuote(selection) {
+    return `${selectionQuoteStart}${selection.text}${selectionQuoteEnd}`;
+  }
+
+  function composerHasSelectionQuote() {
+    return ragComposer.value.trimStart().startsWith(selectionQuoteStart);
+  }
+
+  function parseComposerSubmission() {
+    const raw = ragComposer.value.trim();
+    if (!raw.startsWith(selectionQuoteStart)) {
+      return { message: raw, selection: null };
+    }
+    const withoutStart = raw.slice(selectionQuoteStart.length);
+    const boundary = withoutStart.indexOf(selectionQuoteEnd);
+    if (boundary < 0) {
+      return { message: raw, selection: null };
+    }
+    const quotedText = withoutStart.slice(0, boundary).trim();
+    const message = withoutStart.slice(boundary + selectionQuoteEnd.length).trim();
+    if (!quotedText || !selectedSelection) {
+      return { message, selection: null };
+    }
+    return {
+      message,
+      selection: {
+        ...selectedSelection,
+        text: quotedText,
+      },
+    };
+  }
+
+  function insertSelectionIntoComposer(selection) {
+    if (!selection || !selection.text) {
+      return;
+    }
+    const previous = parseComposerSubmission();
+    const preservedMessage = composerHasSelectionQuote() ? previous.message : ragComposer.value.trim();
+    if (!composerHasSelectionQuote() && preservedMessage) {
+      ragComposer.value = `${formatSelectionQuote(selection)}${preservedMessage}`;
+    } else {
+      ragComposer.value = `${formatSelectionQuote(selection)}${preservedMessage}`;
+    }
+    autoResizeComposer();
+    ragComposer.focus();
+    ragComposer.selectionStart = ragComposer.value.length;
+    ragComposer.selectionEnd = ragComposer.value.length;
+  }
+
+  function removeSelectionQuoteFromComposer() {
+    if (!composerHasSelectionQuote()) {
+      return;
+    }
+    ragComposer.value = parseComposerSubmission().message;
+    autoResizeComposer();
+  }
+
+  function autoResizeComposer() {
+    ragComposer.style.height = "auto";
+    ragComposer.style.height = `${Math.min(ragComposer.scrollHeight, 240)}px`;
+  }
+
   function clearSelection() {
     selectedText = "";
     selectedSelection = null;
     pendingSelectionIntent = "";
     ragComposer.placeholder = defaultComposerPlaceholder;
+    removeSelectionQuoteFromComposer();
     if (selectionCard) {
       selectionCard.hidden = true;
     }
@@ -235,30 +302,66 @@
       empty.className = "muted-text";
       empty.textContent = "暂无历史对话";
       conversationList.appendChild(empty);
+      if (conversationMore) {
+        conversationMore.hidden = true;
+      }
       return;
     }
-    conversations.forEach((conversation) => {
+    const visibleConversations = conversationsExpanded ? conversations : conversations.slice(0, 3);
+    visibleConversations.forEach((conversation) => {
       const item = document.createElement("div");
       item.className = `script-conversation-item${conversation.conversation_id === currentConversationId ? " active" : ""}`;
-      const meta = document.createElement("button");
-      meta.className = "script-conversation-meta text-button";
-      meta.type = "button";
-      meta.addEventListener("click", () => loadConversation(conversation.conversation_id));
+      const date = document.createElement("time");
+      date.className = "script-conversation-date";
+      date.textContent = formatConversationTime(conversation.updated_at || conversation.created_at || "");
       const title = document.createElement("strong");
+      title.className = "script-conversation-title";
       title.textContent = conversation.title || "新对话";
-      const time = document.createElement("span");
-      time.textContent = conversation.updated_at || conversation.created_at || "";
-      const preview = document.createElement("small");
-      preview.textContent = conversation.last_message_preview || "还没有消息";
-      meta.append(title, time, preview);
+      title.title = conversation.title || "新对话";
+      title.addEventListener("click", () => loadConversation(conversation.conversation_id));
+      const moreWrap = document.createElement("div");
+      moreWrap.className = "script-conversation-more-wrap";
+      const moreButton = document.createElement("button");
+      moreButton.className = "script-conversation-kebab";
+      moreButton.type = "button";
+      moreButton.textContent = "...";
+      const menu = document.createElement("div");
+      menu.className = "script-conversation-more-menu";
+      menu.hidden = true;
+      const loadButton = document.createElement("button");
+      loadButton.type = "button";
+      loadButton.textContent = "加载对话";
+      loadButton.addEventListener("click", () => loadConversation(conversation.conversation_id));
+      const renameButton = document.createElement("button");
+      renameButton.type = "button";
+      renameButton.textContent = "修改标题";
+      renameButton.addEventListener("click", () => renameConversation(conversation));
       const deleteButton = document.createElement("button");
-      deleteButton.className = "text-button";
       deleteButton.type = "button";
-      deleteButton.textContent = "删除";
+      deleteButton.textContent = "删除对话";
       deleteButton.addEventListener("click", () => deleteConversation(conversation.conversation_id));
-      item.append(meta, deleteButton);
+      menu.append(loadButton, renameButton, deleteButton);
+      moreButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        root.querySelectorAll(".script-conversation-more-menu").forEach((node) => {
+          if (node !== menu) {
+            node.hidden = true;
+          }
+        });
+        menu.hidden = !menu.hidden;
+      });
+      moreWrap.append(moreButton, menu);
+      item.append(date, title, moreWrap);
       conversationList.appendChild(item);
     });
+    if (conversationMore) {
+      conversationMore.hidden = conversations.length <= 3;
+      conversationMore.textContent = conversationsExpanded ? "⌃ 收起历史" : "⌄ 更多历史";
+    }
+  }
+
+  function formatConversationTime(value) {
+    return String(value || "").replace("T", " ").slice(0, 16);
   }
 
   async function createConversation(title, options) {
@@ -303,11 +406,37 @@
     conversationTitle.textContent = payload.conversation.title || "新对话";
     renderConversationMessages(payload.messages || []);
     renderConversationList();
-    conversationList.hidden = true;
     ragStatus.textContent = "";
   }
 
+  async function renameConversation(conversation) {
+    const nextTitle = window.prompt("修改标题", conversation.title || "新对话");
+    if (!nextTitle || !nextTitle.trim()) {
+      return;
+    }
+    const response = await fetch(
+      `/api/script/generations/${encodeURIComponent(generationId)}/assistant/conversations/${encodeURIComponent(conversation.conversation_id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: nextTitle.trim() }),
+      }
+    );
+    const payload = await response.json();
+    if (!response.ok) {
+      ragStatus.textContent = payload.error || "标题修改失败";
+      return;
+    }
+    if (currentConversationId === conversation.conversation_id) {
+      conversationTitle.textContent = payload.conversation.title || "新对话";
+    }
+    await refreshConversationList();
+  }
+
   async function deleteConversation(conversationId) {
+    if (!window.confirm("确定删除这条历史对话吗？")) {
+      return;
+    }
     const response = await fetch(
       `/api/script/generations/${encodeURIComponent(generationId)}/assistant/conversations/${encodeURIComponent(conversationId)}`,
       { method: "DELETE" }
@@ -377,20 +506,22 @@
   }
 
   async function askAgent() {
-    const instruction = ragComposer.value.trim();
+    const submission = parseComposerSubmission();
+    const instruction = submission.message.trim();
     const intentHint = pendingSelectionIntent;
-    const includeSelection = Boolean(intentHint && selectedSelection);
+    const selectionForMessage = submission.selection || (intentHint && selectedSelection ? selectedSelection : null);
     if (!instruction) {
-      ragStatus.textContent = includeSelection ? "请描述你想怎么处理这段。" : "请输入你的问题或修改意见。";
+      ragStatus.textContent = selectionForMessage ? "请描述你想怎么处理这段。" : "请输入你的问题或修改意见。";
       return;
     }
     pendingSelectionIntent = "";
     ragComposer.placeholder = defaultComposerPlaceholder;
-    await sendAssistantMessage(instruction, intentHint, includeSelection);
+    await sendAssistantMessage(instruction, intentHint, selectionForMessage);
     ragComposer.value = "";
+    autoResizeComposer();
   }
 
-  async function sendAssistantMessage(message, intentHint, includeSelection, patchId) {
+  async function sendAssistantMessage(message, intentHint, selectionForMessage, patchId) {
     const conversationId = await ensureConversation();
     if (!conversationId) {
       return;
@@ -399,8 +530,8 @@
     if (intentHint) {
       body.intent_hint = intentHint;
     }
-    if (includeSelection && selectedSelection) {
-      body.selection = selectedSelection;
+    if (selectionForMessage) {
+      body.selection = selectionForMessage;
     }
     if (patchId) {
       body.patch_id = patchId;
@@ -445,11 +576,11 @@
   }
 
   function applyPatch(patchId) {
-    sendAssistantMessage("应用这个修改", "apply_patch", false, patchId);
+    sendAssistantMessage("应用这个修改", "apply_patch", null, patchId);
   }
 
   function rejectPatch(patchId) {
-    sendAssistantMessage("放弃这个修改", "reject_patch", false, patchId);
+    sendAssistantMessage("放弃这个修改", "reject_patch", null, patchId);
   }
 
   function applyReplacement(replacement) {
@@ -478,23 +609,31 @@
   });
   editSave.addEventListener("click", saveArticle);
   conversationNew.addEventListener("click", () => createConversation("新对话", { load: true }));
-  conversationToggle.addEventListener("click", () => {
-    conversationList.hidden = !conversationList.hidden;
-  });
+  if (conversationMore) {
+    conversationMore.addEventListener("click", () => {
+      conversationsExpanded = !conversationsExpanded;
+      renderConversationList();
+    });
+  }
   ragAsk.addEventListener("click", askAgent);
   ragComposer.addEventListener("keydown", (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      askAgent();
+    } else if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
       askAgent();
     }
   });
+  ragComposer.addEventListener("input", autoResizeComposer);
   selectionExplain.addEventListener("click", () => {
     if (requireSelection()) {
-      sendAssistantMessage("解释这段", "explain", true);
+      sendAssistantMessage("解释这段", "explain", selectedSelection);
     }
   });
   selectionReview.addEventListener("click", () => {
     if (requireSelection()) {
-      sendAssistantMessage("评审这段", "review", true);
+      sendAssistantMessage("评审这段", "review", selectedSelection);
     }
   });
   selectionEdit.addEventListener("click", () => {
@@ -502,9 +641,10 @@
       return;
     }
     ragComposer.placeholder = "请描述你想怎么改这段";
-    const message = ragComposer.value.trim() || "帮我改写这段";
+    const message = parseComposerSubmission().message.trim() || "帮我改写这段";
     ragComposer.value = "";
-    sendAssistantMessage(message, "edit", true);
+    autoResizeComposer();
+    sendAssistantMessage(message, "edit", selectedSelection);
   });
   selectionHistory.addEventListener("click", () => {
     if (requireSelection()) {

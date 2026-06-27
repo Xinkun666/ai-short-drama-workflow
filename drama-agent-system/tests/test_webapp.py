@@ -1242,6 +1242,106 @@ def test_assist_auto_creates_conversation_when_missing(tmp_path):
     assert payload["conversation"]["title"] == "你好"
 
 
+def test_conversation_title_uses_first_user_message(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    conversation = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={},
+    ).get_json()["conversation"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation["conversation_id"],
+            "message": "   请解释这段开头为什么这样写，并指出有没有事实依据不足的地方。   ",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["conversation"]["title"] == "请解释这段开头为什么这样写，并指出有没有事实依据不足的地方。"
+    assert payload["conversation"]["title_manual"] is False
+
+
+def test_conversation_title_uses_paragraph_action_summary(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    conversation = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={},
+    ).get_json()["conversation"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation["conversation_id"],
+            "message": "解释这段",
+            "intent_hint": "explain",
+            "selection": {"text": "这波不是迁徙，是人类大型开图。", "paragraph_id": "script-paragraph-3"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["conversation"]["title"] == "解释第 3 段"
+
+
+def test_manual_title_is_not_overwritten(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    conversation = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={},
+    ).get_json()["conversation"]
+    update_response = client.patch(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations/{conversation['conversation_id']}",
+        json={"title": "手动命名的开头讨论"},
+    )
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation["conversation_id"],
+            "message": "这条消息不应该覆盖手动标题",
+        },
+    )
+
+    assert update_response.status_code == 200
+    assert update_response.get_json()["conversation"]["title_manual"] is True
+    assert response.status_code == 200
+    assert response.get_json()["conversation"]["title"] == "手动命名的开头讨论"
+
+
 def test_assist_saves_messages_to_conversation(tmp_path):
     library = tmp_path / "资料库"
     library.mkdir()
@@ -1276,6 +1376,49 @@ def test_assist_saves_messages_to_conversation(tmp_path):
     assert payload["messages"][0]["conversation_id"] == conversation["conversation_id"]
     assert payload["messages"][1]["intent"] == "SMALLTALK"
     assert payload["conversation"]["message_count"] == 2
+
+
+def test_message_with_selection_stays_in_current_conversation(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    first = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "当前对话"},
+    ).get_json()["conversation"]
+    second = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "另一个对话"},
+    ).get_json()["conversation"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": second["conversation_id"],
+            "message": "解释这段",
+            "intent_hint": "explain",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+    detail = client.get(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations/{second['conversation_id']}"
+    )
+    list_response = client.get(f"/api/script/generations/{generation['generation_id']}/assistant/conversations")
+
+    assert response.status_code == 200
+    assert response.get_json()["conversation"]["conversation_id"] == second["conversation_id"]
+    assert detail.get_json()["messages"][0]["conversation_id"] == second["conversation_id"]
+    assert len(list_response.get_json()["conversations"]) == 2
+    assert first["conversation_id"] in {item["conversation_id"] for item in list_response.get_json()["conversations"]}
 
 
 def test_assist_uses_current_conversation_history_only(tmp_path):
@@ -1492,6 +1635,217 @@ def test_legacy_messages_have_fallback_conversation(tmp_path):
     assert detail.get_json()["messages"][0]["content"] == "旧消息"
 
 
+def test_focus_switches_when_user_says_explain_this_selection(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    conversation = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={},
+    ).get_json()["conversation"]
+    client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation["conversation_id"],
+            "message": "解释这段",
+            "intent_hint": "explain",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation["conversation_id"],
+            "message": "解释这段",
+            "intent_hint": "explain",
+            "selection": {"text": "这波不是迁徙，是人类大型开图。", "paragraph_id": "script-paragraph-2"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["focus_action"] == "SWITCH_TO_NEW"
+    assert payload["conversation"]["active_paragraph_id"] == "script-paragraph-2"
+    assert provider.edit_payload["selection"] == "这波不是迁徙，是人类大型开图。"
+
+
+def test_focus_keeps_current_when_user_says_continue(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    first = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "帮我润色这段",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+    conversation_id = first.get_json()["conversation"]["conversation_id"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation_id,
+            "message": "继续改短一点",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["focus_action"] == "KEEP_CURRENT"
+    assert provider.edit_payload["selection"] == "智人开局，装备一般"
+
+
+def test_focus_uses_new_selection_as_reference(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    first = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "解释这段",
+            "intent_hint": "explain",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+    conversation_id = first.get_json()["conversation"]["conversation_id"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation_id,
+            "message": "结合这段补一下前面",
+            "selection": {"text": "这波不是迁徙，是人类大型开图。", "paragraph_id": "script-paragraph-2"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["focus_action"] == "USE_NEW_AS_REFERENCE"
+    assert provider.edit_payload["selection"] == "智人开局，装备一般"
+    assert provider.edit_payload["reference_selection"]["text"] == "这波不是迁徙，是人类大型开图。"
+
+
+def test_focus_compares_two_selections(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    first = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "解释这段",
+            "intent_hint": "explain",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+    conversation_id = first.get_json()["conversation"]["conversation_id"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation_id,
+            "message": "这两段有什么区别",
+            "selection": {"text": "这波不是迁徙，是人类大型开图。", "paragraph_id": "script-paragraph-2"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["focus_action"] == "COMPARE_CURRENT_AND_NEW"
+    assert provider.edit_payload["focus_action"] == "COMPARE_CURRENT_AND_NEW"
+    assert provider.edit_payload["selection"] == "智人开局，装备一般"
+    assert provider.edit_payload["reference_selection"]["text"] == "这波不是迁徙，是人类大型开图。"
+
+
+def test_focus_asks_clarification_when_ambiguous(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    first = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "帮我润色这段",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+    conversation_id = first.get_json()["conversation"]["conversation_id"]
+    before_patch_count = count_script_edit_patches(
+        tmp_path / "outputs" / "material_workstation.sqlite3",
+        generation["generation_id"],
+    )
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation_id,
+            "message": "这样行吗",
+            "selection": {"text": "这波不是迁徙，是人类大型开图。", "paragraph_id": "script-paragraph-2"},
+        },
+    )
+    after_patch_count = count_script_edit_patches(
+        tmp_path / "outputs" / "material_workstation.sqlite3",
+        generation["generation_id"],
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["focus_action"] == "ASK_CLARIFICATION"
+    assert "刚才那段" in payload["result"]["answer"]
+    assert after_patch_count == before_patch_count
+    assert provider.edit_payload["selection"] == "智人开局，装备一般"
+
+
 def test_script_assistant_keeps_conversation_context_between_turns(tmp_path):
     library = tmp_path / "资料库"
     library.mkdir()
@@ -1647,7 +2001,7 @@ def test_script_reader_uses_chinese_article_typography():
     assert "[hidden]" in styles
     assert "display: none !important;" in styles
     assert "width: min(100vw - 64px, 1420px);" in page_shell_rule
-    assert "grid-template-columns: minmax(0, 1fr) 430px;" in workspace_rule
+    assert "grid-template-columns: minmax(0, 1fr) minmax(620px, 700px);" in workspace_rule
     assert "gap: 28px;" in workspace_rule
     assert "max-width: 100%;" in article_card_rule
     assert "max-width: 100%;" in toolbar_rule
@@ -1677,7 +2031,8 @@ def test_script_reader_uses_chinese_article_typography():
     assert "ragComposer.value = selectedText" not in reader_script
     assert "data-conversation-title" in template
     assert "data-conversation-new" in template
-    assert "data-conversation-toggle" in template
+    assert "data-conversation-sidebar" in template
+    assert "data-conversation-more" in template
     assert "data-conversation-list" in template
     assert "data-selection-card" in template
     assert "data-selection-summary" in template
@@ -1687,6 +2042,7 @@ def test_script_reader_uses_chinese_article_typography():
     assert "data-selection-history" in template
     assert "data-selection-clear" in template
     assert ".script-conversation-bar" in styles
+    assert ".script-conversation-sidebar" in styles
     assert ".script-conversation-list" in styles
     assert ".script-selection-card" in styles
     assert "initializeConversations" in reader_script
@@ -1697,6 +2053,48 @@ def test_script_reader_uses_chinese_article_typography():
     assert "applyPatch" in reader_script
     assert "rejectPatch" in reader_script
     assert "patch_id" in reader_script
+
+
+def test_conversation_list_limits_to_three_in_frontend_logic():
+    reader_script = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "script_reader.js").read_text(encoding="utf-8")
+    template = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "templates" / "script_generation_view.html").read_text(encoding="utf-8")
+    styles = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "styles.css").read_text(encoding="utf-8")
+
+    assert "data-conversation-sidebar" in template
+    assert "script-conversation-sidebar" in template
+    assert "script-conversation-more-menu" in reader_script
+    assert "conversationsExpanded" in reader_script
+    assert "conversations.slice(0, 3)" in reader_script
+    assert "data-conversation-more" in template
+    assert ".script-conversation-more-menu" in styles
+
+
+def test_selection_does_not_load_history_automatically():
+    reader_script = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "script_reader.js").read_text(encoding="utf-8")
+
+    assert "insertSelectionIntoComposer" in reader_script
+    assert "parseComposerSubmission" in reader_script
+    assert "loadSelectionHistory(selectedSelection.text)" in reader_script
+    update_selected_block = reader_script[
+        reader_script.index("function updateSelectedText()") : reader_script.index("function syncSelectionAfterPointerUp()")
+    ]
+    assert "insertSelectionIntoComposer" in update_selected_block
+    assert "loadSelectionHistory" not in update_selected_block
+    assert "loadConversation" not in update_selected_block
+    assert "currentConversationId =" not in update_selected_block
+
+
+def test_composer_send_button_is_compact_inside_textarea():
+    template = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "templates" / "script_generation_view.html").read_text(encoding="utf-8")
+    styles = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "styles.css").read_text(encoding="utf-8")
+    reader_script = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "script_reader.js").read_text(encoding="utf-8")
+
+    assert "script-rag-composer-inner" in template
+    assert 'class="script-rag-send"' in template
+    send_rule = styles[styles.index(".script-rag-send") : styles.index(".script-rag-send:hover")]
+    assert "position: absolute;" in send_rule
+    assert "Enter 发送，Shift + Enter 换行" in template
+    assert 'event.key === "Enter" && !event.shiftKey' in reader_script
 
 
 def test_timeline_api_can_force_rebuild_existing_timeline(tmp_path):

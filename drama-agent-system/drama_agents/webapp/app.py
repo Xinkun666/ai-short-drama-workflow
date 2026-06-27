@@ -297,6 +297,21 @@ def create_app(
             }
         )
 
+    @app.route("/api/script/generations/<generation_id>/assistant/conversations/<conversation_id>", methods=["PATCH"])
+    def update_script_assistant_conversation(generation_id: str, conversation_id: str):
+        payload = request.get_json(silent=True) or {}
+        title = str(payload.get("title") or "").strip()
+        if not title:
+            return jsonify({"error": "标题不能为空"}), 400
+        database = MaterialDatabase(database_path)
+        if not database.find_script_generation(generation_id):
+            abort(404)
+        try:
+            conversation = database.update_script_assistant_conversation_title(generation_id, conversation_id, title)
+        except KeyError:
+            abort(404)
+        return jsonify({"conversation": conversation})
+
     @app.route("/api/script/generations/<generation_id>/assistant/conversations/<conversation_id>", methods=["DELETE"])
     def delete_script_assistant_conversation(generation_id: str, conversation_id: str):
         database = MaterialDatabase(database_path)
@@ -531,9 +546,13 @@ def assistant_history_message(message: dict) -> dict:
         "role": message.get("role", ""),
         "content": message.get("content", ""),
         "intent": message.get("intent", ""),
+        "focus_action": message.get("focus_action", ""),
         "selection": message.get("selection", ""),
         "selection_text": message.get("selection", ""),
+        "reference_selection": message.get("reference_selection", ""),
+        "reference_selection_text": message.get("reference_selection", ""),
         "selection_hash": message.get("selection_hash", ""),
+        "reference_selection_hash": message.get("reference_selection_hash", ""),
         "paragraph_id": message.get("paragraph_id", ""),
         "start_offset": message.get("start_offset"),
         "end_offset": message.get("end_offset"),

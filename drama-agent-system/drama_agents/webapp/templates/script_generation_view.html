@@ -102,36 +102,48 @@
                   <p>阅读、评审和局部修改当前剧本；确认后才会保存改动。</p>
                 </div>
               </div>
-              <div class="script-conversation-bar">
-                <strong data-conversation-title>新对话</strong>
-                <div>
-                  <button class="text-button" type="button" data-conversation-new>新建对话</button>
-                  <button class="text-button" type="button" data-conversation-toggle>历史对话</button>
+              <div class="script-rag-body">
+                <div class="script-rag-main">
+                  <div class="script-conversation-bar">
+                    <strong data-conversation-title>新对话</strong>
+                    <div>
+                      <button class="text-button" type="button" data-conversation-new>新建对话</button>
+                    </div>
+                  </div>
+                  <div class="script-selection-card" data-selection-card hidden>
+                    <div>
+                      <strong data-selection-summary>已选中 0 字</strong>
+                      <button class="text-button" type="button" data-selection-clear>取消选区</button>
+                    </div>
+                    <div class="script-selection-actions">
+                      <button class="text-button" type="button" data-selection-explain>解释这段</button>
+                      <button class="text-button" type="button" data-selection-review>评审这段</button>
+                      <button class="text-button" type="button" data-selection-edit>改写这段</button>
+                      <button class="text-button" type="button" data-selection-history>相关历史</button>
+                    </div>
+                    <div class="script-selection-history" data-selection-history-panel hidden></div>
+                  </div>
+                  <div class="script-rag-chat" data-rag-chat>
+                    <div class="script-rag-message assistant">
+                      <p>你好，我可以陪你阅读、评审和修改这版剧本。你可以直接聊天，也可以选中一段让我审查或改写。</p>
+                    </div>
+                  </div>
+                  <div class="script-rag-status" data-rag-status></div>
+                  <div class="script-rag-composer">
+                    <div class="script-rag-composer-inner">
+                      <textarea data-rag-composer placeholder="直接输入问题；选中正文后会带入输入框。Enter 发送，Shift + Enter 换行"></textarea>
+                      <button class="script-rag-send" type="button" data-rag-ask title="发送">发送</button>
+                    </div>
+                    <small>Enter 发送，Shift + Enter 换行</small>
+                  </div>
                 </div>
-              </div>
-              <div class="script-conversation-list" data-conversation-list hidden></div>
-              <div class="script-selection-card" data-selection-card hidden>
-                <div>
-                  <strong data-selection-summary>已选中 0 字</strong>
-                  <button class="text-button" type="button" data-selection-clear>取消选区</button>
-                </div>
-                <div class="script-selection-actions">
-                  <button class="text-button" type="button" data-selection-explain>解释这段</button>
-                  <button class="text-button" type="button" data-selection-review>评审这段</button>
-                  <button class="text-button" type="button" data-selection-edit>改写这段</button>
-                  <button class="text-button" type="button" data-selection-history>相关历史</button>
-                </div>
-                <div class="script-selection-history" data-selection-history-panel hidden></div>
-              </div>
-              <div class="script-rag-chat" data-rag-chat>
-                <div class="script-rag-message assistant">
-                  <p>你好，我可以陪你阅读、评审和修改这版剧本。你可以直接聊天，也可以选中一段让我审查或改写。</p>
-                </div>
-              </div>
-              <div class="script-rag-status" data-rag-status></div>
-              <div class="script-rag-composer">
-                <textarea data-rag-composer placeholder="直接输入问题；选中正文后可点解释、评审或改写"></textarea>
-                <button class="command-button primary" type="button" data-rag-ask>发送</button>
+                <aside class="script-conversation-sidebar" data-conversation-sidebar>
+                  <div class="script-conversation-sidebar-head">
+                    <strong>历史对话</strong>
+                  </div>
+                  <div class="script-conversation-list" data-conversation-list></div>
+                  <button class="script-conversation-more" type="button" data-conversation-more hidden>⌄ 更多历史</button>
+                </aside>
               </div>
             </aside>
           </div>

@@ -21,6 +21,12 @@ APPLY_PATCH = "APPLY_PATCH"
 REJECT_PATCH = "REJECT_PATCH"
 ASK_SOURCE = "ASK_SOURCE"
 
+KEEP_CURRENT = "KEEP_CURRENT"
+SWITCH_TO_NEW = "SWITCH_TO_NEW"
+USE_NEW_AS_REFERENCE = "USE_NEW_AS_REFERENCE"
+COMPARE_CURRENT_AND_NEW = "COMPARE_CURRENT_AND_NEW"
+ASK_CLARIFICATION = "ASK_CLARIFICATION"
+
 
 @dataclass(frozen=True)
 class AssistantSelection:
@@ -41,6 +47,16 @@ class AssistantRequest:
     conversation_id: str = ""
     intent_hint: str = ""
     patch_id: int | None = None
+
+
+@dataclass(frozen=True)
+class FocusResolution:
+    focus_action: str
+    primary_selection: AssistantSelection
+    reference_selection: AssistantSelection = AssistantSelection()
+    active_selection: AssistantSelection = AssistantSelection()
+    focus_reason: str = ""
+    clarification_answer: str = ""
 
 
 class ScriptAssistantIntentRouter:
@@ -79,6 +95,8 @@ class ScriptAssistantIntentRouter:
             return REVISE_PENDING
         if has_source_marker(compact):
             return ASK_SOURCE
+        if has_compare_marker(compact):
+            return EXPLAIN_SELECTION if has_selection else EXPLAIN_SCRIPT
         if has_edit_marker(compact):
             return PROPOSE_EDIT if has_selection or active_patch else SMALLTALK
         if has_review_marker(compact):
@@ -86,6 +104,98 @@ class ScriptAssistantIntentRouter:
         if has_explain_marker(compact):
             return EXPLAIN_SELECTION if has_selection else EXPLAIN_SCRIPT
         return SMALLTALK
+
+
+class ScriptAssistantFocusResolver:
+    def resolve(
+        self,
+        *,
+        current_selection: AssistantSelection,
+        new_selection: AssistantSelection,
+        message: str,
+        intent: str,
+        recent_messages: list[dict[str, Any]],
+        active_patch: dict[str, Any] | None = None,
+    ) -> FocusResolution:
+        compact = compact_text(message)
+        current = current_selection if current_selection.text else selection_from_patch(active_patch)
+        has_current = bool(current.text)
+        has_new = bool(new_selection.text)
+
+        if intent in {APPLY_PATCH, REJECT_PATCH}:
+            return FocusResolution(
+                focus_action=KEEP_CURRENT,
+                primary_selection=current,
+                active_selection=current,
+                focus_reason="patch action keeps current discussion target",
+            )
+
+        if intent == SMALLTALK and is_smalltalk(compact):
+            return FocusResolution(
+                focus_action=KEEP_CURRENT,
+                primary_selection=AssistantSelection(),
+                active_selection=current,
+                focus_reason="ordinary chat does not force a selection",
+            )
+
+        if has_new and has_current and has_compare_marker(compact):
+            return FocusResolution(
+                focus_action=COMPARE_CURRENT_AND_NEW,
+                primary_selection=current,
+                reference_selection=new_selection,
+                active_selection=current,
+                focus_reason="user asked to compare current and newly selected passages",
+            )
+
+        if has_new and has_current and has_reference_marker(compact):
+            return FocusResolution(
+                focus_action=USE_NEW_AS_REFERENCE,
+                primary_selection=current,
+                reference_selection=new_selection,
+                active_selection=current,
+                focus_reason="new selection is reference material for the current passage",
+            )
+
+        if has_new and has_current and active_patch and has_ambiguous_focus_marker(compact):
+            return FocusResolution(
+                focus_action=ASK_CLARIFICATION,
+                primary_selection=current,
+                reference_selection=new_selection,
+                active_selection=current,
+                focus_reason="ambiguous new selection while a pending patch exists",
+                clarification_answer="你是想继续改刚才那段，还是切换到新选中的这一段？",
+            )
+
+        if has_current and (intent == REVISE_PENDING or has_continue_focus_marker(compact)):
+            return FocusResolution(
+                focus_action=KEEP_CURRENT,
+                primary_selection=current,
+                active_selection=current,
+                focus_reason="user is continuing the current discussion",
+            )
+
+        if has_new and (not has_current or has_explicit_new_focus_marker(compact) or intent_uses_selection(intent)):
+            return FocusResolution(
+                focus_action=SWITCH_TO_NEW,
+                primary_selection=new_selection,
+                active_selection=new_selection,
+                focus_reason="new selection becomes the main discussion target",
+            )
+
+        if has_current:
+            return FocusResolution(
+                focus_action=KEEP_CURRENT,
+                primary_selection=current,
+                active_selection=current,
+                focus_reason="no new target; keep current discussion target",
+            )
+
+        return FocusResolution(
+            focus_action=KEEP_CURRENT,
+            primary_selection=AssistantSelection(),
+            active_selection=AssistantSelection(),
+            focus_reason="no active discussion target",
+        )
 
 
 class ScriptAssistantMemory:
@@ -138,7 +248,23 @@ class ScriptAssistantMemory:
         self.state = self.database.update_script_assistant_conversation_state(
             self.generation_id,
             self.conversation_id,
-            active_selection_id=(selection.selection_id if selection and selection.text else ""),
+            active_selection_id=(selection.selection_id if selection and selection.text else self.state.get("active_selection_id", "")),
+            active_selection_text=(selection.text if selection and selection.text else self.state.get("active_selection_text", "")),
+            active_selection_hash=(
+                text_hash(selection.text)
+                if selection and selection.text
+                else self.state.get("active_selection_hash", "")
+            ),
+            active_paragraph_id=(selection.paragraph_id if selection and selection.text else self.state.get("active_paragraph_id", "")),
+            active_start_offset=(
+                selection.start_offset if selection and selection.text else self.state.get("active_start_offset")
+            ),
+            active_end_offset=(
+                selection.end_offset if selection and selection.text else self.state.get("active_end_offset")
+            ),
+            active_focus_reason=(
+                f"{intent}: {selection.selection_id}" if selection and selection.text else self.state.get("active_focus_reason", "")
+            ),
             active_patch_id=patch_id,
             session_summary="；".join(summary_parts),
             style_preferences=preferences[-12:],
@@ -160,6 +286,7 @@ class ScriptAssistantController:
         self.rag_database_path = Path(rag_database_path)
         self.outputs_path = Path(outputs_path)
         self.router = ScriptAssistantIntentRouter()
+        self.focus_resolver = ScriptAssistantFocusResolver()
 
     def handle(self, generation_id: str, raw_payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
         request = normalize_assist_request(raw_payload)
@@ -186,25 +313,70 @@ class ScriptAssistantController:
             patch_id=request.patch_id,
             active_patch=active_patch,
         )
-        effective_selection = selection_for_intent(intent, request.selection, active_patch)
+        recent_messages = self.database.list_script_assistant_messages(
+            generation_id,
+            conversation_id=conversation["conversation_id"],
+            limit=12,
+        )
+        focus = self.focus_resolver.resolve(
+            current_selection=selection_from_conversation(conversation),
+            new_selection=request.selection,
+            message=request.message,
+            intent=intent,
+            recent_messages=recent_messages,
+            active_patch=active_patch,
+        )
+        effective_selection = selection_for_intent(intent, focus.primary_selection, active_patch)
         self.database.add_script_assistant_message(
             generation_id=generation_id,
             conversation_id=conversation["conversation_id"],
             role="user",
             content=request.message,
-            selection=effective_selection.text if intent_uses_selection(intent) else "",
+            selection=effective_selection.text,
+            reference_selection=focus.reference_selection.text,
             intent=intent,
+            focus_action=focus.focus_action,
             patch_id=request.patch_id,
             selection_hash=text_hash(effective_selection.text) if effective_selection.text else "",
+            reference_selection_hash=(
+                text_hash(focus.reference_selection.text) if focus.reference_selection.text else ""
+            ),
             paragraph_id=effective_selection.paragraph_id,
             start_offset=effective_selection.start_offset,
             end_offset=effective_selection.end_offset,
         )
 
-        if intent == SMALLTALK:
-            result = assistant_result(
+        if focus.focus_action == ASK_CLARIFICATION:
+            result = with_focus(
+                assistant_result(
+                    intent=intent,
+                    answer=focus.clarification_answer,
+                ),
+                focus,
+            )
+            memory.update(
                 intent=intent,
-                answer=smalltalk_answer(request.message, has_selection=bool(request.selection.text)),
+                selection=focus.active_selection if focus.active_selection.text else None,
+                article_version_hash=article_hash,
+                user_message=request.message,
+            )
+            memory.state = self._save_assistant_message(
+                generation_id,
+                conversation["conversation_id"],
+                result,
+                effective_selection,
+                [],
+                focus,
+            )
+            return self._payload(result, [], memory.state), 200
+
+        if intent == SMALLTALK:
+            result = with_focus(
+                assistant_result(
+                    intent=intent,
+                    answer=smalltalk_answer(request.message, has_selection=bool(effective_selection.text)),
+                ),
+                focus,
             )
             memory.update(intent=intent, article_version_hash=article_hash, user_message=request.message)
             memory.state = self._save_assistant_message(
@@ -213,6 +385,7 @@ class ScriptAssistantController:
                 result,
                 effective_selection,
                 [],
+                focus,
             )
             return self._payload(result, [], memory.state), 200
 
@@ -224,6 +397,7 @@ class ScriptAssistantController:
                 current_generation=generation,
                 article_hash=article_hash,
             )
+            result = with_focus(result, focus)
             memory.update(
                 intent=intent,
                 article_version_hash=article_version_hash(script_article(updated_generation or generation)),
@@ -236,6 +410,7 @@ class ScriptAssistantController:
                 result,
                 effective_selection,
                 [],
+                focus,
             )
             payload = self._payload(result, [], memory.state)
             if updated_generation:
@@ -243,7 +418,10 @@ class ScriptAssistantController:
             return payload, status
 
         if intent == REJECT_PATCH:
-            result = self._reject_patch(generation_id, conversation["conversation_id"], request.patch_id, active_patch)
+            result = with_focus(
+                self._reject_patch(generation_id, conversation["conversation_id"], request.patch_id, active_patch),
+                focus,
+            )
             memory.update(
                 intent=intent,
                 patch_id=None,
@@ -257,13 +435,17 @@ class ScriptAssistantController:
                 result,
                 effective_selection,
                 [],
+                focus,
             )
             return self._payload(result, [], memory.state), 200
 
         if intent in {PROPOSE_EDIT, REVISE_PENDING} and not effective_selection.text:
-            result = assistant_result(
-                intent=intent,
-                answer="请先选中要修改的剧本文字，或点击某条候选修改继续调整。",
+            result = with_focus(
+                assistant_result(
+                    intent=intent,
+                    answer="请先选中要修改的剧本文字，或点击某条候选修改继续调整。",
+                ),
+                focus,
             )
             memory.update(intent=intent, article_version_hash=article_hash, user_message=request.message)
             memory.state = self._save_assistant_message(
@@ -272,15 +454,11 @@ class ScriptAssistantController:
                 result,
                 effective_selection,
                 [],
+                focus,
             )
             return self._payload(result, [], memory.state), 200
 
         contexts = self._contexts_for_intent(intent, request.message, effective_selection, generation)
-        recent_messages = self.database.list_script_assistant_messages(
-            generation_id,
-            conversation_id=conversation["conversation_id"],
-            limit=12,
-        )
         try:
             result = self.script_agent.assist_edit(
                 generation=generation,
@@ -291,13 +469,16 @@ class ScriptAssistantController:
                 pending_edit=active_patch if intent == REVISE_PENDING else None,
                 intent=intent,
                 memory=memory.state,
+                reference_selection=selection_to_dict(focus.reference_selection),
+                focus_action=focus.focus_action,
+                focus_reason=focus.focus_reason,
             )
         except ValueError as exc:
             return {"error": str(exc)}, 400
         except RuntimeError as exc:
             return {"error": str(exc)}, 500
 
-        result = normalize_controller_result(result, intent)
+        result = with_focus(normalize_controller_result(result, intent), focus)
         patch_id = None
         if intent in {PROPOSE_EDIT, REVISE_PENDING} and result.get("replacement"):
             if intent == REVISE_PENDING and active_patch:
@@ -320,7 +501,7 @@ class ScriptAssistantController:
 
         memory.update(
             intent=intent,
-            selection=effective_selection,
+            selection=focus.active_selection if focus.active_selection.text else effective_selection,
             patch_id=patch_id,
             article_version_hash=article_hash,
             user_message=request.message,
@@ -331,6 +512,7 @@ class ScriptAssistantController:
             result,
             effective_selection,
             contexts,
+            focus,
         )
         return self._payload(result, contexts, memory.state), 200
 
@@ -456,16 +638,22 @@ class ScriptAssistantController:
         result: dict[str, Any],
         selection: AssistantSelection,
         contexts: list[dict[str, Any]],
+        focus: FocusResolution,
     ) -> dict[str, Any]:
         self.database.add_script_assistant_message(
             generation_id=generation_id,
             conversation_id=conversation_id,
             role="assistant",
             content=str(result.get("answer") or ""),
-            selection=selection.text if intent_uses_selection(str(result.get("intent") or "")) else "",
+            selection=selection.text,
+            reference_selection=focus.reference_selection.text,
             intent=str(result.get("intent") or ""),
+            focus_action=focus.focus_action,
             patch_id=parse_optional_int(result.get("patch_id")),
             selection_hash=text_hash(selection.text) if selection.text else "",
+            reference_selection_hash=(
+                text_hash(focus.reference_selection.text) if focus.reference_selection.text else ""
+            ),
             paragraph_id=selection.paragraph_id,
             start_offset=selection.start_offset,
             end_offset=selection.end_offset,
@@ -513,6 +701,38 @@ def normalize_selection(raw_selection: Any) -> AssistantSelection:
     return AssistantSelection(text=str(raw_selection or "").strip())
 
 
+def selection_from_conversation(conversation: dict[str, Any]) -> AssistantSelection:
+    return AssistantSelection(
+        text=str(conversation.get("active_selection_text") or "").strip(),
+        paragraph_id=str(conversation.get("active_paragraph_id") or "").strip(),
+        start_offset=parse_optional_int(conversation.get("active_start_offset")),
+        end_offset=parse_optional_int(conversation.get("active_end_offset")),
+    )
+
+
+def selection_from_patch(patch: dict[str, Any] | None) -> AssistantSelection:
+    if not patch:
+        return AssistantSelection()
+    return AssistantSelection(
+        text=str(patch.get("selection") or "").strip(),
+        paragraph_id=str(patch.get("paragraph_id") or "").strip(),
+        start_offset=parse_optional_int(patch.get("start_offset")),
+        end_offset=parse_optional_int(patch.get("end_offset")),
+    )
+
+
+def selection_to_dict(selection: AssistantSelection) -> dict[str, Any]:
+    if not selection.text:
+        return {}
+    return {
+        "text": selection.text,
+        "paragraph_id": selection.paragraph_id,
+        "start_offset": selection.start_offset,
+        "end_offset": selection.end_offset,
+        "selection_hash": text_hash(selection.text),
+    }
+
+
 def parse_optional_int(value: Any) -> int | None:
     if value is None or value == "":
         return None
@@ -537,6 +757,15 @@ def selection_for_intent(
             end_offset=active_patch.get("end_offset"),
         )
     return AssistantSelection()
+
+
+def with_focus(result: dict[str, Any], focus: FocusResolution) -> dict[str, Any]:
+    focused = dict(result)
+    focused["focus_action"] = focus.focus_action
+    focused["focus_reason"] = focus.focus_reason
+    focused["reference_selection"] = selection_to_dict(focus.reference_selection)
+    focused["active_selection"] = selection_to_dict(focus.active_selection)
+    return focused
 
 
 def normalize_controller_result(result: dict[str, Any], intent: str) -> dict[str, Any]:
@@ -681,14 +910,75 @@ def has_revision_marker(compact: str) -> bool:
     )
 
 
+def has_continue_focus_marker(compact: str) -> bool:
+    return any(
+        marker in compact
+        for marker in (
+            "继续",
+            "再短",
+            "改短",
+            "再改",
+            "上一版",
+            "刚才",
+            "保留刚才",
+            "保留原意",
+            "不要这么",
+            "不，",
+            "不对",
+        )
+    )
+
+
 def has_source_marker(compact: str) -> bool:
     return any(marker in compact for marker in ("史实", "依据", "出处", "来源", "可靠", "真实吗", "材料支持"))
+
+
+def has_compare_marker(compact: str) -> bool:
+    return any(marker in compact for marker in ("对比", "比较", "这两段", "两个段落", "有什么区别", "区别", "前后衔接"))
+
+
+def has_reference_marker(compact: str) -> bool:
+    return any(marker in compact for marker in ("参考这段", "结合这段", "作为补充", "补充材料", "用这段补", "补一下前面"))
+
+
+def has_explicit_new_focus_marker(compact: str) -> bool:
+    return any(
+        marker in compact
+        for marker in (
+            "改这段",
+            "解释这段",
+            "评审这段",
+            "这段是什么意思",
+            "新选的这段",
+            "新选这段",
+            "当前这段",
+        )
+    )
+
+
+def has_ambiguous_focus_marker(compact: str) -> bool:
+    return compact in {"这样行吗", "你看看", "怎么改"} or any(
+        marker in compact for marker in ("这样可以吗", "这样好吗", "行吗", "可以吗")
+    )
 
 
 def has_edit_marker(compact: str) -> bool:
     return any(
         marker in compact
-        for marker in ("润色", "改写", "重写", "补充", "调整", "更口语", "帮我改", "修改这段", "加几个", "疑问句", "放在开头")
+        for marker in (
+            "润色",
+            "改写",
+            "重写",
+            "补充",
+            "补一下",
+            "调整",
+            "更口语",
+            "帮我改",
+            "修改这段",
+            "加几个",
+            "疑问句",
+            "放在开头",
+        )
     )
 
 

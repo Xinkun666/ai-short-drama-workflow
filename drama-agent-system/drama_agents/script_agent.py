@@ -126,6 +126,9 @@ class ScriptAgent:
         pending_edit: dict[str, Any] | None = None,
         intent: str = "PROPOSE_EDIT",
         memory: dict[str, Any] | None = None,
+        reference_selection: dict[str, Any] | None = None,
+        focus_action: str = "",
+        focus_reason: str = "",
     ) -> dict[str, Any]:
         clean_selection = selection.strip()
         clean_instruction = instruction.strip()
@@ -147,6 +150,9 @@ class ScriptAgent:
             "pending_edit": pending_edit or {},
             "intent": intent,
             "memory": memory or {},
+            "reference_selection": reference_selection or {},
+            "focus_action": focus_action,
+            "focus_reason": focus_reason,
         }
         return normalize_edit_payload(self.provider.edit_selection(payload))
 
@@ -686,12 +692,30 @@ def assistant_prompt_common(payload: dict[str, Any]) -> dict[str, str]:
     conversation_text = json.dumps(compact_conversation(payload.get("conversation", [])), ensure_ascii=False, indent=2)
     pending_edit_text = json.dumps(payload.get("pending_edit") or {}, ensure_ascii=False, indent=2)
     memory_text = json.dumps(payload.get("memory") or {}, ensure_ascii=False, indent=2)
+    reference_selection_text = json.dumps(payload.get("reference_selection") or {}, ensure_ascii=False, indent=2)
+    focus_context_text = json.dumps(
+        {
+            "focus_action": payload.get("focus_action") or "",
+            "focus_reason": payload.get("focus_reason") or "",
+            "primary_selection": payload.get("selection") or "",
+            "reference_selection": payload.get("reference_selection") or {},
+            "instruction": (
+                "primary_selection 是当前主要讨论或要修改的段落；"
+                "reference_selection 只是参考材料或对比对象，除非 focus_action 是 SWITCH_TO_NEW，"
+                "不要把参考段误当成要替换的主段落。"
+            ),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
     return {
         "topic": str(payload.get("topic") or ""),
         "time_range": str(payload.get("time_range") or ""),
         "script_title": str(payload.get("script_title") or ""),
         "script": json.dumps(payload.get("script", {}), ensure_ascii=False, indent=2),
         "selection": str(payload.get("selection") or ""),
+        "reference_selection": reference_selection_text,
+        "focus_context": focus_context_text,
         "instruction": str(payload.get("instruction") or ""),
         "contexts": contexts_text,
         "conversation": conversation_text,
@@ -723,6 +747,9 @@ def build_chat_prompt(payload: dict[str, Any]) -> str:
 
 当前记忆：
 {data["memory"]}
+
+当前讨论焦点：
+{data["focus_context"]}
 """.strip()
 
 
@@ -753,6 +780,12 @@ def build_explain_prompt(payload: dict[str, Any]) -> str:
 
 用户选中的原文：
 {data["selection"]}
+
+本次新选区/参考选区：
+{data["reference_selection"]}
+
+当前讨论焦点：
+{data["focus_context"]}
 
 用户要求：
 {data["instruction"]}
@@ -789,6 +822,12 @@ def build_review_prompt_for_assistant(payload: dict[str, Any]) -> str:
 
 用户选中的原文：
 {data["selection"]}
+
+本次新选区/参考选区：
+{data["reference_selection"]}
+
+当前讨论焦点：
+{data["focus_context"]}
 
 用户要求：
 {data["instruction"]}
@@ -827,6 +866,12 @@ def build_edit_proposal_prompt(payload: dict[str, Any]) -> str:
 用户选中的原文：
 {data["selection"]}
 
+本次新选区/参考选区：
+{data["reference_selection"]}
+
+当前讨论焦点：
+{data["focus_context"]}
+
 用户要求：
 {data["instruction"]}
 
@@ -861,6 +906,12 @@ def build_revise_pending_prompt(payload: dict[str, Any]) -> str:
 
 用户选中的原文：
 {data["selection"]}
+
+本次新选区/参考选区：
+{data["reference_selection"]}
+
+当前讨论焦点：
+{data["focus_context"]}
 
 用户新的调整意见：
 {data["instruction"]}

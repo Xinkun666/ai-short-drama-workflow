@@ -136,9 +136,12 @@ class MaterialDatabase:
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     selection_text TEXT NOT NULL DEFAULT '',
+                    reference_selection_text TEXT NOT NULL DEFAULT '',
                     intent TEXT NOT NULL DEFAULT '',
+                    focus_action TEXT NOT NULL DEFAULT '',
                     patch_id INTEGER,
                     selection_hash TEXT NOT NULL DEFAULT '',
+                    reference_selection_hash TEXT NOT NULL DEFAULT '',
                     paragraph_id TEXT NOT NULL DEFAULT '',
                     start_offset INTEGER,
                     end_offset INTEGER,
@@ -155,11 +158,18 @@ class MaterialDatabase:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     last_message_preview TEXT NOT NULL DEFAULT '',
                     message_count INTEGER NOT NULL DEFAULT 0,
+                    title_manual INTEGER NOT NULL DEFAULT 0,
                     is_archived INTEGER NOT NULL DEFAULT 0,
                     session_summary TEXT NOT NULL DEFAULT '',
                     style_preferences_json TEXT NOT NULL DEFAULT '[]',
                     active_patch_id INTEGER,
-                    active_selection_id TEXT NOT NULL DEFAULT ''
+                    active_selection_id TEXT NOT NULL DEFAULT '',
+                    active_selection_text TEXT NOT NULL DEFAULT '',
+                    active_selection_hash TEXT NOT NULL DEFAULT '',
+                    active_paragraph_id TEXT NOT NULL DEFAULT '',
+                    active_start_offset INTEGER,
+                    active_end_offset INTEGER,
+                    active_focus_reason TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS script_edit_patches (
@@ -209,9 +219,12 @@ class MaterialDatabase:
                 "script_assistant_messages",
                 {
                     "conversation_id": "TEXT NOT NULL DEFAULT ''",
+                    "reference_selection_text": "TEXT NOT NULL DEFAULT ''",
                     "intent": "TEXT NOT NULL DEFAULT ''",
+                    "focus_action": "TEXT NOT NULL DEFAULT ''",
                     "patch_id": "INTEGER",
                     "selection_hash": "TEXT NOT NULL DEFAULT ''",
+                    "reference_selection_hash": "TEXT NOT NULL DEFAULT ''",
                     "paragraph_id": "TEXT NOT NULL DEFAULT ''",
                     "start_offset": "INTEGER",
                     "end_offset": "INTEGER",
@@ -222,6 +235,19 @@ class MaterialDatabase:
                 CREATE INDEX IF NOT EXISTS idx_script_assistant_messages_conversation
                     ON script_assistant_messages(conversation_id, message_id)
                 """
+            )
+            ensure_table_columns(
+                connection,
+                "script_assistant_conversations",
+                {
+                    "title_manual": "INTEGER NOT NULL DEFAULT 0",
+                    "active_selection_text": "TEXT NOT NULL DEFAULT ''",
+                    "active_selection_hash": "TEXT NOT NULL DEFAULT ''",
+                    "active_paragraph_id": "TEXT NOT NULL DEFAULT ''",
+                    "active_start_offset": "INTEGER",
+                    "active_end_offset": "INTEGER",
+                    "active_focus_reason": "TEXT NOT NULL DEFAULT ''",
+                },
             )
             ensure_table_columns(
                 connection,
@@ -651,6 +677,12 @@ class MaterialDatabase:
         style_preferences: list[str] | None = None,
         active_patch_id: int | None = None,
         active_selection_id: str = "",
+        active_selection_text: str = "",
+        active_selection_hash: str = "",
+        active_paragraph_id: str = "",
+        active_start_offset: int | None = None,
+        active_end_offset: int | None = None,
+        active_focus_reason: str = "",
     ) -> dict[str, Any]:
         with self.connect() as connection:
             connection.execute(
@@ -660,6 +692,12 @@ class MaterialDatabase:
                     style_preferences_json = ?,
                     active_patch_id = ?,
                     active_selection_id = ?,
+                    active_selection_text = ?,
+                    active_selection_hash = ?,
+                    active_paragraph_id = ?,
+                    active_start_offset = ?,
+                    active_end_offset = ?,
+                    active_focus_reason = ?,
                     updated_at = ?
                 WHERE generation_id = ? AND conversation_id = ?
                 """,
@@ -668,11 +706,42 @@ class MaterialDatabase:
                     json_dumps(style_preferences or []),
                     active_patch_id,
                     active_selection_id,
+                    active_selection_text,
+                    active_selection_hash,
+                    active_paragraph_id,
+                    active_start_offset,
+                    active_end_offset,
+                    active_focus_reason,
                     current_timestamp(),
                     generation_id,
                     conversation_id,
                 ),
             )
+        conversation = self.find_script_assistant_conversation(generation_id, conversation_id)
+        if not conversation:
+            raise KeyError(conversation_id)
+        return conversation
+
+    def update_script_assistant_conversation_title(
+        self,
+        generation_id: str,
+        conversation_id: str,
+        title: str,
+    ) -> dict[str, Any]:
+        clean_title = conversation_title_from_message(title, limit=40)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE script_assistant_conversations
+                SET title = ?,
+                    title_manual = 1,
+                    updated_at = ?
+                WHERE generation_id = ? AND conversation_id = ? AND is_archived = 0
+                """,
+                (clean_title, current_timestamp(), generation_id, conversation_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(conversation_id)
         conversation = self.find_script_assistant_conversation(generation_id, conversation_id)
         if not conversation:
             raise KeyError(conversation_id)
@@ -686,9 +755,12 @@ class MaterialDatabase:
         role: str,
         content: str,
         selection: str = "",
+        reference_selection: str = "",
         intent: str = "",
+        focus_action: str = "",
         patch_id: int | None = None,
         selection_hash: str = "",
+        reference_selection_hash: str = "",
         paragraph_id: str = "",
         start_offset: int | None = None,
         end_offset: int | None = None,
@@ -712,10 +784,11 @@ class MaterialDatabase:
             cursor = connection.execute(
                 """
                 INSERT INTO script_assistant_messages (
-                    generation_id, conversation_id, role, content, selection_text, intent,
-                    patch_id, selection_hash, paragraph_id, start_offset, end_offset,
+                    generation_id, conversation_id, role, content, selection_text, reference_selection_text,
+                    intent, focus_action, patch_id, selection_hash, reference_selection_hash,
+                    paragraph_id, start_offset, end_offset,
                     result_json, contexts_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     generation_id,
@@ -723,9 +796,12 @@ class MaterialDatabase:
                     role,
                     content,
                     selection,
+                    reference_selection,
                     intent,
+                    focus_action,
                     patch_id,
                     selection_hash,
+                    reference_selection_hash,
                     paragraph_id,
                     start_offset,
                     end_offset,
@@ -737,8 +813,9 @@ class MaterialDatabase:
             if conversation_id:
                 message_count = int(conversation["message_count"] or 0) + 1 if conversation else 1
                 title = conversation["title"] if conversation else "新对话"
-                if role == "user" and title in {"", "新对话"}:
-                    title = conversation_title_from_message(content, intent=intent, paragraph_id=paragraph_id)
+                title_manual = bool(conversation["title_manual"]) if conversation else False
+                if role == "user" and not title_manual and title in {"", "新对话"}:
+                    title = conversation_title_from_message(content, intent=intent, paragraph_id=paragraph_id, limit=40)
                 connection.execute(
                     """
                     UPDATE script_assistant_conversations
@@ -1252,9 +1329,12 @@ def script_assistant_message_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "role": row["role"],
         "content": row["content"],
         "selection": row["selection_text"],
+        "reference_selection": row["reference_selection_text"],
         "intent": row["intent"],
+        "focus_action": row["focus_action"],
         "patch_id": row["patch_id"],
         "selection_hash": row["selection_hash"],
+        "reference_selection_hash": row["reference_selection_hash"],
         "paragraph_id": row["paragraph_id"],
         "start_offset": row["start_offset"],
         "end_offset": row["end_offset"],
@@ -1273,11 +1353,18 @@ def script_assistant_conversation_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "updated_at": row["updated_at"],
         "last_message_preview": row["last_message_preview"],
         "message_count": row["message_count"],
+        "title_manual": bool(row["title_manual"]),
         "is_archived": bool(row["is_archived"]),
         "session_summary": row["session_summary"],
         "style_preferences": json_loads(row["style_preferences_json"], default=[]),
         "active_patch_id": row["active_patch_id"],
         "active_selection_id": row["active_selection_id"],
+        "active_selection_text": row["active_selection_text"],
+        "active_selection_hash": row["active_selection_hash"],
+        "active_paragraph_id": row["active_paragraph_id"],
+        "active_start_offset": row["active_start_offset"],
+        "active_end_offset": row["active_end_offset"],
+        "active_focus_reason": row["active_focus_reason"],
     }
 
 
@@ -1387,7 +1474,7 @@ def preview_text(value: str, *, limit: int = 80) -> str:
     return text[:limit]
 
 
-def conversation_title_from_message(content: str, *, intent: str = "", paragraph_id: str = "") -> str:
+def conversation_title_from_message(content: str, *, intent: str = "", paragraph_id: str = "", limit: int = 40) -> str:
     paragraph = paragraph_number(paragraph_id)
     if intent == "EXPLAIN_SELECTION" and paragraph:
         return f"解释第 {paragraph} 段"
@@ -1395,7 +1482,7 @@ def conversation_title_from_message(content: str, *, intent: str = "", paragraph
         return f"评审第 {paragraph} 段"
     if intent in {"PROPOSE_EDIT", "REVISE_PENDING"} and paragraph:
         return f"修改第 {paragraph} 段"
-    clean = preview_text(content, limit=20)
+    clean = preview_text(content, limit=limit)
     return clean or "新对话"
 
 
