@@ -2033,6 +2033,8 @@ def test_script_reader_uses_chinese_article_typography():
     assert "data-conversation-new" in template
     assert "data-conversation-sidebar" in template
     assert "data-conversation-more" in template
+    assert "styles.css') }}?v=20260627b" in template
+    assert "script_reader.js') }}?v=20260627b" in template
     assert "data-conversation-list" in template
     assert "data-selection-card" in template
     assert "data-selection-summary" in template
