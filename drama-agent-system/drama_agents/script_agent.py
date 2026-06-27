@@ -124,6 +124,8 @@ class ScriptAgent:
         contexts: list[dict[str, Any]],
         conversation: list[dict[str, Any]] | None = None,
         pending_edit: dict[str, Any] | None = None,
+        intent: str = "PROPOSE_EDIT",
+        memory: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         clean_selection = selection.strip()
         clean_instruction = instruction.strip()
@@ -143,6 +145,8 @@ class ScriptAgent:
             "contexts": contexts,
             "conversation": conversation or [],
             "pending_edit": pending_edit or {},
+            "intent": intent,
+            "memory": memory or {},
         }
         return normalize_edit_payload(self.provider.edit_selection(payload))
 
@@ -198,13 +202,14 @@ class DeepSeekScriptProvider:
         )
 
     def edit_selection(self, payload: dict[str, Any]) -> dict[str, Any]:
+        intent = str(payload.get("intent") or "")
         return self._complete_json(
             system=(
                 "你是剧本阅读、评审、修改对话助手，使用 DeepSeek V4 Pro 风格能力工作。"
-                "你能正常聊天，也能读取当前完整剧本、推导链条和本地资料片段来审查或局部修改。"
+                "后端已经完成意图识别，你只能执行指定任务，不能自行决定保存正文。"
                 "只输出合法 JSON。"
             ),
-            prompt=build_selection_edit_prompt(payload),
+            prompt=build_assistant_prompt(payload, intent=intent),
             temperature=0.45,
             max_tokens=int(os.environ.get("SCRIPT_EDIT_MAX_TOKENS", "3600")),
         )
@@ -664,10 +669,218 @@ def build_revision_prompt(source_payload: dict[str, Any], draft: dict[str, Any],
 """.strip()
 
 
-def build_selection_edit_prompt(payload: dict[str, Any]) -> str:
+def build_assistant_prompt(payload: dict[str, Any], *, intent: str) -> str:
+    if intent == "SMALLTALK":
+        return build_chat_prompt(payload)
+    if intent in {"EXPLAIN_SCRIPT", "EXPLAIN_SELECTION", "ASK_SOURCE"}:
+        return build_explain_prompt(payload)
+    if intent in {"REVIEW_SCRIPT", "REVIEW_SELECTION"}:
+        return build_review_prompt_for_assistant(payload)
+    if intent == "REVISE_PENDING":
+        return build_revise_pending_prompt(payload)
+    return build_edit_proposal_prompt(payload)
+
+
+def assistant_prompt_common(payload: dict[str, Any]) -> dict[str, str]:
     contexts_text = json.dumps(payload.get("contexts", []), ensure_ascii=False, indent=2)
     conversation_text = json.dumps(compact_conversation(payload.get("conversation", [])), ensure_ascii=False, indent=2)
     pending_edit_text = json.dumps(payload.get("pending_edit") or {}, ensure_ascii=False, indent=2)
+    memory_text = json.dumps(payload.get("memory") or {}, ensure_ascii=False, indent=2)
+    return {
+        "topic": str(payload.get("topic") or ""),
+        "time_range": str(payload.get("time_range") or ""),
+        "script_title": str(payload.get("script_title") or ""),
+        "script": json.dumps(payload.get("script", {}), ensure_ascii=False, indent=2),
+        "selection": str(payload.get("selection") or ""),
+        "instruction": str(payload.get("instruction") or ""),
+        "contexts": contexts_text,
+        "conversation": conversation_text,
+        "pending_edit": pending_edit_text,
+        "memory": memory_text,
+    }
+
+
+def build_chat_prompt(payload: dict[str, Any]) -> str:
+    data = assistant_prompt_common(payload)
+    return f"""
+你是固定在剧本阅读器右侧的“剧本对话助手”。当前任务是普通聊天或功能说明。
+
+规则：
+1. 自然、简短地回答用户。
+2. 不要生成 replacement。
+3. 不要声称已经保存或修改正文。
+4. 如用户询问功能，说明：可以解释整篇或选中段落、评审剧本、生成候选修改；候选修改必须用户点击应用后才会保存。
+
+输出严格 JSON：
+{{
+  "answer": "给用户的自然语言回复",
+  "replacement": "",
+  "used_context_ids": []
+}}
+
+用户要求：
+{data["instruction"]}
+
+当前记忆：
+{data["memory"]}
+""".strip()
+
+
+def build_explain_prompt(payload: dict[str, Any]) -> str:
+    data = assistant_prompt_common(payload)
+    return f"""
+你是剧本解释助手。当前任务是解释剧本或选中段落，不做改写。
+
+规则：
+1. 只解释含义、叙事作用、事实边界。
+2. 如有本地资料片段，只引用实际使用的 chunk_id。
+3. replacement 必须为空字符串。
+4. 不要生成候选修改，不要保存正文。
+
+输出严格 JSON：
+{{
+  "answer": "解释内容",
+  "replacement": "",
+  "used_context_ids": ["实际使用的 chunk_id"]
+}}
+
+主题：{data["topic"]}
+时间范围：{data["time_range"]}
+剧本标题：{data["script_title"]}
+
+完整剧本与推导链条：
+{data["script"]}
+
+用户选中的原文：
+{data["selection"]}
+
+用户要求：
+{data["instruction"]}
+
+本地资料片段：
+{data["contexts"]}
+""".strip()
+
+
+def build_review_prompt_for_assistant(payload: dict[str, Any]) -> str:
+    data = assistant_prompt_common(payload)
+    return f"""
+你是剧本评审助手。当前任务是评审整篇剧本或选中段落，不直接改写。
+
+规则：
+1. 指出结构、事实、叙事节奏、可补充处。
+2. 如果用户没有明确要求“直接改写”，replacement 必须为空字符串。
+3. 事实判断要依据完整剧本、本地资料片段和推导链条；资料不足就说明不足。
+4. 不要保存正文。
+
+输出严格 JSON：
+{{
+  "answer": "评审意见和建议",
+  "replacement": "",
+  "used_context_ids": ["实际使用的 chunk_id"]
+}}
+
+主题：{data["topic"]}
+时间范围：{data["time_range"]}
+剧本标题：{data["script_title"]}
+
+完整剧本与推导链条：
+{data["script"]}
+
+用户选中的原文：
+{data["selection"]}
+
+用户要求：
+{data["instruction"]}
+
+本地资料片段：
+{data["contexts"]}
+
+最近对话历史：
+{data["conversation"]}
+""".strip()
+
+
+def build_edit_proposal_prompt(payload: dict[str, Any]) -> str:
+    data = assistant_prompt_common(payload)
+    return f"""
+你是局部改写助手。当前任务只生成候选 replacement，不保存正文。
+
+规则：
+1. 只改写“用户选中的原文”，不能重写整篇剧本。
+2. replacement 必须是可直接替换选中文本的正文，不带标题、解释、Markdown 或引号。
+3. answer 简短说明修改方向，并提醒这是待确认候选。
+4. 优先遵守记忆里的风格偏好，例如口语、事实谨慎、不要营销号。
+5. 必须依据当前剧本和本地资料片段；资料不足时不要编造成确定事实。
+
+输出严格 JSON：
+{{
+  "answer": "候选修改说明",
+  "replacement": "只用于替换选中内容的正文",
+  "used_context_ids": ["实际使用的 chunk_id"]
+}}
+
+主题：{data["topic"]}
+时间范围：{data["time_range"]}
+剧本标题：{data["script_title"]}
+
+用户选中的原文：
+{data["selection"]}
+
+用户要求：
+{data["instruction"]}
+
+当前记忆：
+{data["memory"]}
+
+本地资料片段：
+{data["contexts"]}
+
+完整剧本与推导链条：
+{data["script"]}
+""".strip()
+
+
+def build_revise_pending_prompt(payload: dict[str, Any]) -> str:
+    data = assistant_prompt_common(payload)
+    return f"""
+你是候选修改返修助手。当前任务是基于上一版候选修改继续调整，生成新的 replacement，不保存正文。
+
+规则：
+1. 仍然只替换同一段原文。
+2. 必须参考“待确认修改”和用户新的调整意见。
+3. replacement 只放新候选正文，不带解释、标题或 Markdown。
+4. answer 说明这一版相对上一版怎么调整。
+
+输出严格 JSON：
+{{
+  "answer": "返修说明",
+  "replacement": "新的候选替换正文",
+  "used_context_ids": ["实际使用的 chunk_id"]
+}}
+
+用户选中的原文：
+{data["selection"]}
+
+用户新的调整意见：
+{data["instruction"]}
+
+待确认修改：
+{data["pending_edit"]}
+
+当前记忆：
+{data["memory"]}
+
+本地资料片段：
+{data["contexts"]}
+
+最近对话历史：
+{data["conversation"]}
+""".strip()
+
+
+def build_selection_edit_prompt(payload: dict[str, Any]) -> str:
+    data = assistant_prompt_common(payload)
     return f"""
 你是固定在剧本阅读器右侧的“剧本对话助手”。请像 ChatGPT 一样自然回应用户，同时能阅读当前完整剧本、推导链条和本地资料片段。
 
@@ -695,7 +908,7 @@ def build_selection_edit_prompt(payload: dict[str, Any]) -> str:
 剧本标题：{payload.get("script_title", "")}
 
 完整剧本与推导链条：
-{json.dumps(payload.get("script", {}), ensure_ascii=False, indent=2)}
+{data["script"]}
 
 用户选中的原文：
 {payload.get("selection", "")}
@@ -704,13 +917,13 @@ def build_selection_edit_prompt(payload: dict[str, Any]) -> str:
 {payload.get("instruction", "")}
 
 最近对话历史：
-{conversation_text}
+{data["conversation"]}
 
 待确认修改：
-{pending_edit_text}
+{data["pending_edit"]}
 
 本地资料片段：
-{contexts_text}
+{data["contexts"]}
 """.strip()
 
 

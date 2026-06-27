@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ generation.topic }} - {{ section_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260623i">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260627a">
   </head>
   <body>
     <main class="script-page-shell">
@@ -102,6 +102,17 @@
                   <p>阅读、评审和局部修改当前剧本；确认后才会保存改动。</p>
                 </div>
               </div>
+              <div class="script-selection-card" data-selection-card hidden>
+                <div>
+                  <strong data-selection-summary>已选中 0 字</strong>
+                  <button class="text-button" type="button" data-selection-clear>取消选区</button>
+                </div>
+                <div class="script-selection-actions">
+                  <button class="text-button" type="button" data-selection-explain>解释这段</button>
+                  <button class="text-button" type="button" data-selection-review>评审这段</button>
+                  <button class="text-button" type="button" data-selection-edit>改写这段</button>
+                </div>
+              </div>
               <div class="script-rag-chat" data-rag-chat>
                 <div class="script-rag-message assistant">
                   <p>你好，我可以陪你阅读、评审和修改这版剧本。你可以直接聊天，也可以选中一段让我审查或改写。</p>
@@ -109,7 +120,7 @@
               </div>
               <div class="script-rag-status" data-rag-status></div>
               <div class="script-rag-composer">
-                <textarea data-rag-composer placeholder="直接输入问题；选中正文后会带引号填入，可继续写修改想法"></textarea>
+                <textarea data-rag-composer placeholder="直接输入问题；选中正文后可点解释、评审或改写"></textarea>
                 <button class="command-button primary" type="button" data-rag-ask>发送</button>
               </div>
             </aside>
@@ -161,7 +172,7 @@
       {% endif %}
     </main>
     {% if section == "script" %}
-      <script src="{{ url_for('static', filename='script_reader.js') }}?v=20260623i"></script>
+      <script src="{{ url_for('static', filename='script_reader.js') }}?v=20260627a"></script>
     {% endif %}
   </body>
 </html>

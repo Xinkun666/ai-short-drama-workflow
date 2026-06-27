@@ -143,10 +143,26 @@ class MaterialDatabase:
                     generation_id TEXT NOT NULL,
                     selection_text TEXT NOT NULL,
                     replacement_text TEXT NOT NULL,
+                    selection_hash TEXT NOT NULL DEFAULT '',
+                    paragraph_id TEXT NOT NULL DEFAULT '',
+                    start_offset INTEGER,
+                    end_offset INTEGER,
+                    article_version_hash TEXT NOT NULL DEFAULT '',
                     answer TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'pending',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     applied_at TEXT NOT NULL DEFAULT ''
+                );
+
+                CREATE TABLE IF NOT EXISTS script_assistant_state (
+                    generation_id TEXT PRIMARY KEY,
+                    active_intent TEXT NOT NULL DEFAULT '',
+                    active_selection_id TEXT NOT NULL DEFAULT '',
+                    active_patch_id INTEGER,
+                    article_version_hash TEXT NOT NULL DEFAULT '',
+                    session_summary TEXT NOT NULL DEFAULT '',
+                    style_preferences_json TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_material_chapters_record
@@ -160,6 +176,17 @@ class MaterialDatabase:
                 CREATE INDEX IF NOT EXISTS idx_script_edit_patches_generation
                     ON script_edit_patches(generation_id, status, created_at);
                 """
+            )
+            ensure_table_columns(
+                connection,
+                "script_edit_patches",
+                {
+                    "selection_hash": "TEXT NOT NULL DEFAULT ''",
+                    "paragraph_id": "TEXT NOT NULL DEFAULT ''",
+                    "start_offset": "INTEGER",
+                    "end_offset": "INTEGER",
+                    "article_version_hash": "TEXT NOT NULL DEFAULT ''",
+                },
             )
 
     def upsert_parse(self, record: dict[str, Any], result_data: dict[str, Any]) -> dict[str, Any]:
@@ -490,17 +517,41 @@ class MaterialDatabase:
         selection: str,
         replacement: str,
         answer: str = "",
+        selection_hash: str = "",
+        paragraph_id: str = "",
+        start_offset: int | None = None,
+        end_offset: int | None = None,
+        article_version_hash: str = "",
     ) -> int:
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO script_edit_patches (
-                    generation_id, selection_text, replacement_text, answer, status
-                ) VALUES (?, ?, ?, ?, 'pending')
+                    generation_id, selection_text, replacement_text, selection_hash,
+                    paragraph_id, start_offset, end_offset, article_version_hash, answer, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
                 """,
-                (generation_id, selection, replacement, answer),
+                (
+                    generation_id,
+                    selection,
+                    replacement,
+                    selection_hash,
+                    paragraph_id,
+                    start_offset,
+                    end_offset,
+                    article_version_hash,
+                    answer,
+                ),
             )
             return int(cursor.lastrowid)
+
+    def find_script_edit_patch(self, patch_id: int) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM script_edit_patches WHERE patch_id = ?",
+                (patch_id,),
+            ).fetchone()
+        return script_edit_patch_from_row(row) if row else None
 
     def latest_pending_script_edit_patch(self, generation_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -515,6 +566,27 @@ class MaterialDatabase:
             ).fetchone()
         return script_edit_patch_from_row(row) if row else None
 
+    def mark_generation_pending_patches_stale(self, generation_id: str, *, except_patch_id: int | None = None) -> None:
+        with self.connect() as connection:
+            if except_patch_id is None:
+                connection.execute(
+                    """
+                    UPDATE script_edit_patches
+                    SET status = 'stale'
+                    WHERE generation_id = ? AND status = 'pending'
+                    """,
+                    (generation_id,),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE script_edit_patches
+                    SET status = 'stale'
+                    WHERE generation_id = ? AND status = 'pending' AND patch_id <> ?
+                    """,
+                    (generation_id, except_patch_id),
+                )
+
     def mark_script_edit_patch_applied(self, patch_id: int) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -526,6 +598,76 @@ class MaterialDatabase:
                 """,
                 (patch_id,),
             )
+
+    def mark_script_edit_patch_status(self, patch_id: int, status: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE script_edit_patches
+                SET status = ?,
+                    applied_at = CASE WHEN ? = 'applied' THEN CURRENT_TIMESTAMP ELSE applied_at END
+                WHERE patch_id = ?
+                """,
+                (status, status, patch_id),
+            )
+
+    def get_script_assistant_state(self, generation_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM script_assistant_state WHERE generation_id = ?",
+                (generation_id,),
+            ).fetchone()
+        if row:
+            return script_assistant_state_from_row(row)
+        return {
+            "generation_id": generation_id,
+            "active_intent": "",
+            "active_selection_id": "",
+            "active_patch_id": None,
+            "article_version_hash": "",
+            "session_summary": "",
+            "style_preferences": [],
+            "updated_at": "",
+        }
+
+    def upsert_script_assistant_state(
+        self,
+        generation_id: str,
+        *,
+        active_intent: str = "",
+        active_selection_id: str = "",
+        active_patch_id: int | None = None,
+        article_version_hash: str = "",
+        session_summary: str = "",
+        style_preferences: list[str] | None = None,
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO script_assistant_state (
+                    generation_id, active_intent, active_selection_id, active_patch_id,
+                    article_version_hash, session_summary, style_preferences_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(generation_id) DO UPDATE SET
+                    active_intent=excluded.active_intent,
+                    active_selection_id=excluded.active_selection_id,
+                    active_patch_id=excluded.active_patch_id,
+                    article_version_hash=excluded.article_version_hash,
+                    session_summary=excluded.session_summary,
+                    style_preferences_json=excluded.style_preferences_json,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    generation_id,
+                    active_intent,
+                    active_selection_id,
+                    active_patch_id,
+                    article_version_hash,
+                    session_summary,
+                    json_dumps(style_preferences or []),
+                ),
+            )
+        return self.get_script_assistant_state(generation_id)
 
 
 def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -797,10 +939,28 @@ def script_edit_patch_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "generation_id": row["generation_id"],
         "selection": row["selection_text"],
         "replacement": row["replacement_text"],
+        "selection_hash": row["selection_hash"],
+        "paragraph_id": row["paragraph_id"],
+        "start_offset": row["start_offset"],
+        "end_offset": row["end_offset"],
+        "article_version_hash": row["article_version_hash"],
         "answer": row["answer"],
         "status": row["status"],
         "created_at": row["created_at"],
         "applied_at": row["applied_at"],
+    }
+
+
+def script_assistant_state_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "generation_id": row["generation_id"],
+        "active_intent": row["active_intent"],
+        "active_selection_id": row["active_selection_id"],
+        "active_patch_id": row["active_patch_id"],
+        "article_version_hash": row["article_version_hash"],
+        "session_summary": row["session_summary"],
+        "style_preferences": json_loads(row["style_preferences_json"], default=[]),
+        "updated_at": row["updated_at"],
     }
 
 
@@ -860,3 +1020,10 @@ def json_loads(value: str, default):
         return json.loads(value)
     except (TypeError, json.JSONDecodeError):
         return default
+
+
+def ensure_table_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row["name"] for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, ddl in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")

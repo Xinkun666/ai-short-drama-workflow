@@ -14,6 +14,7 @@ from drama_agents.chapter_refiner import ChapterRefiner, result_to_payload as re
 from drama_agents.map_api import REGIONS, clamp_int, ensure_default_data, parse_bbox, parse_bool, region_label, render_map
 from drama_agents.material_splitter import MaterialSplitter, SUPPORTED_MATERIAL_EXTENSIONS, slugify
 from drama_agents.script_agent import ScriptAgent, render_script_markdown
+from drama_agents.script_assistant import ScriptAssistantController
 from drama_agents.storage import MaterialDatabase
 from drama_agents.timeline_builder import TimelineBuilder, result_to_payload as timeline_result_to_payload
 from drama_agents.vector_store import LocalVectorStore, build_material_chunks
@@ -260,108 +261,23 @@ def create_app(
     @app.route("/api/script/generations/<generation_id>/assist", methods=["POST"])
     def assist_script_edit(generation_id: str):
         payload = request.get_json(silent=True) or {}
-        selection = str(payload.get("selection") or "").strip()
-        instruction = str(payload.get("instruction") or "").strip()
-        if not instruction:
-            return jsonify({"error": "请输入你想让剧本对话助手做什么"}), 400
         database = MaterialDatabase(database_path)
-        generation = database.find_script_generation(generation_id)
-        if not generation:
+        if not database.find_script_generation(generation_id):
             abort(404)
-
-        pending = database.latest_pending_script_edit_patch(generation_id)
-        recent_messages = database.list_script_assistant_messages(generation_id, limit=12)
-        effective_selection = selection or carried_selection_for_followup(
-            instruction=instruction,
-            pending=pending,
-            messages=recent_messages,
+        controller = ScriptAssistantController(
+            database=database,
+            script_agent=script_agent,
+            rag_database_path=rag_database_path,
+            outputs_path=outputs_path,
         )
-        database.add_script_assistant_message(
-            generation_id=generation_id,
-            role="user",
-            content=instruction,
-            selection=effective_selection,
-        )
-        conversation = database.list_script_assistant_messages(generation_id, limit=12)
-        if not selection and is_edit_confirmation(instruction):
-            if pending:
-                article = str((generation.get("script") or {}).get("article") or "")
-                if pending["selection"] not in article:
-                    result = {
-                        "answer": "我找不到上一条待修改的原文了，可能正文已经被手动改过。请重新选中要修改的段落。",
-                        "replacement": "",
-                        "used_context_ids": [],
-                        "applied": False,
-                    }
-                    database.add_script_assistant_message(
-                        generation_id=generation_id,
-                        role="assistant",
-                        content=result["answer"],
-                        selection=pending["selection"],
-                        result=result,
-                    )
-                    return jsonify({"result": result, "contexts": []}), 409
-                updated_article = article.replace(pending["selection"], pending["replacement"], 1)
-                generation = database.update_script_article(generation_id, updated_article)
-                sync_script_generation_files(generation)
-                database.mark_script_edit_patch_applied(pending["patch_id"])
-                result = {
-                    "answer": "已按上一条建议修改并保存选中段落。",
-                    "replacement": "",
-                    "used_context_ids": [],
-                    "applied": True,
-                    "applied_patch_id": pending["patch_id"],
-                }
-                database.add_script_assistant_message(
-                    generation_id=generation_id,
-                    role="assistant",
-                    content=result["answer"],
-                    selection=pending["selection"],
-                    result=result,
-                )
-                return jsonify({"result": result, "contexts": [], "generation": generation})
-
-        record_ids = [str(record_id) for record_id in generation.get("selected_record_ids") or []]
-        store = LocalVectorStore(rag_database_path)
-        query_text = f"{effective_selection}\n{instruction}".strip()
-        contexts = store.search(query_text, record_ids=record_ids, limit=6)
-        if not contexts:
-            chunks = build_material_chunks(database, outputs_path, record_ids)
-            store.replace_record_chunks(record_ids, chunks)
-            contexts = store.search(query_text, record_ids=record_ids, limit=6)
         try:
-            result = script_agent.assist_edit(
-                generation=generation,
-                selection=effective_selection,
-                instruction=instruction,
-                contexts=contexts,
-                conversation=conversation,
-                pending_edit=pending,
-            )
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-        except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 500
-        result.setdefault("applied", False)
-        result.setdefault("needs_confirmation", False)
-        if effective_selection and result.get("replacement"):
-            patch_id = database.create_script_edit_patch(
-                generation_id=generation_id,
-                selection=effective_selection,
-                replacement=str(result["replacement"]),
-                answer=str(result.get("answer") or ""),
-            )
-            result["pending_edit_id"] = patch_id
-            result["needs_confirmation"] = True
-        database.add_script_assistant_message(
-            generation_id=generation_id,
-            role="assistant",
-            content=str(result.get("answer") or ""),
-            selection=effective_selection,
-            result=result,
-            contexts=contexts,
-        )
-        return jsonify({"result": result, "contexts": contexts})
+            response_payload, status = controller.handle(generation_id, payload)
+        except KeyError:
+            abort(404)
+        generation = response_payload.get("generation")
+        if generation:
+            sync_script_generation_files(generation)
+        return jsonify(response_payload), status
 
     @app.route("/api/script/generations/<generation_id>/assist/history", methods=["POST"])
     def script_assistant_history(generation_id: str):
@@ -545,6 +461,7 @@ def assistant_history_message(message: dict) -> dict:
         "content": message.get("content", ""),
         "selection": message.get("selection", ""),
         "replacement": result.get("replacement", ""),
+        "patch_id": result.get("patch_id") or result.get("pending_edit_id"),
         "applied": bool(result.get("applied")) if result else False,
         "created_at": message.get("created_at", ""),
     }

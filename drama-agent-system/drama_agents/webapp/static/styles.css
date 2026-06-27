@@ -1274,7 +1274,7 @@ h1 {
   min-height: 0;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto minmax(240px, 1fr) auto auto;
+  grid-template-rows: auto auto minmax(220px, 1fr) auto auto;
   gap: 12px;
 }
 
@@ -1295,6 +1295,41 @@ h1 {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.script-selection-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(22, 163, 74, 0.22);
+  border-radius: 8px;
+  background: var(--soft-green);
+  padding: 12px;
+}
+
+.script-selection-card > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.script-selection-card strong {
+  color: var(--green-dark);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.script-selection-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.script-selection-actions .text-button,
+.script-selection-card [data-selection-clear] {
+  min-height: 34px;
+  padding: 0 8px;
+  font-size: 12px;
 }
 
 .script-rag-chat {

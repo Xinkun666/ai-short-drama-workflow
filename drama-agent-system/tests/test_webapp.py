@@ -152,6 +152,31 @@ class FakeScriptProvider:
 
     def edit_selection(self, payload):
         self.edit_payload = payload
+        intent = payload.get("intent")
+        if intent in {"SMALLTALK", "EXPLAIN_SCRIPT"}:
+            return {
+                "answer": "你好，我是剧本对话助手，可以解释、评审和生成候选修改。",
+                "replacement": "",
+                "used_context_ids": [],
+            }
+        if intent == "EXPLAIN_SELECTION":
+            return {
+                "answer": "这段在说明智人能力起点普通，但叙事能力已经出现。",
+                "replacement": "",
+                "used_context_ids": [],
+            }
+        if intent == "REVIEW_SELECTION":
+            return {
+                "answer": "这段有钩子，但可以补一个更具体的历史因果。",
+                "replacement": "",
+                "used_context_ids": [],
+            }
+        if intent == "ASK_SOURCE":
+            return {
+                "answer": "这个说法需要结合材料依据判断，当前资料片段支持谨慎表述。",
+                "replacement": "",
+                "used_context_ids": [payload["contexts"][0]["chunk_id"]] if payload.get("contexts") else [],
+            }
         return {
             "answer": "你好，我可以阅读、评审和局部修改当前剧本。" if not payload.get("selection") else "这段可以补充火与烹饪如何释放能量。",
             "replacement": "" if not payload.get("selection") else "火和烹饪让食物更容易消化，也减少了咀嚼时间，于是更多能量可以供给大脑。",
@@ -655,6 +680,22 @@ def create_generated_script(client):
     ).get_json()["result"]
 
 
+def count_script_edit_patches(db_path: Path, generation_id: str) -> int:
+    with sqlite3.connect(db_path) as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM script_edit_patches WHERE generation_id = ?",
+            (generation_id,),
+        ).fetchone()[0]
+
+
+def find_script_edit_patch(db_path: Path, patch_id: int) -> dict:
+    with sqlite3.connect(db_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute("SELECT * FROM script_edit_patches WHERE patch_id = ?", (patch_id,)).fetchone()
+    assert row is not None
+    return dict(row)
+
+
 def test_script_article_can_be_edited_and_saved(tmp_path):
     library = tmp_path / "资料库"
     library.mkdir()
@@ -710,6 +751,8 @@ def test_script_rag_builds_vector_index_and_assists_rewrite(tmp_path):
     assert assist_response.status_code == 200
     payload = assist_response.get_json()
     assert "replacement" in payload["result"]
+    assert payload["result"]["intent"] == "PROPOSE_EDIT"
+    assert payload["result"]["patch_id"]
     assert payload["contexts"]
     assert "DeepSeek 整理后的自然正文" in provider.edit_payload["contexts"][0]["text"]
     assert provider.edit_payload["script"]["article"]
@@ -721,10 +764,10 @@ def test_script_rag_builds_vector_index_and_assists_rewrite(tmp_path):
     )
 
     assert chat_response.status_code == 200
-    assert chat_response.get_json()["result"]["replacement"] == ""
-    assert provider.edit_payload["selection"] == ""
-    assert provider.edit_payload["instruction"] == "你好"
-    assert provider.edit_payload["script"]["article"]
+    chat_payload = chat_response.get_json()
+    assert chat_payload["result"]["intent"] == "SMALLTALK"
+    assert chat_payload["result"]["replacement"] == ""
+    assert chat_payload["contexts"] == []
 
     confirm_response = client.post(
         f"/api/script/generations/{generation['generation_id']}/assist",
@@ -733,11 +776,13 @@ def test_script_rag_builds_vector_index_and_assists_rewrite(tmp_path):
 
     assert confirm_response.status_code == 200
     confirm_payload = confirm_response.get_json()
-    assert confirm_payload["result"]["applied"] is True
+    assert confirm_payload["result"]["applied"] is False
+    assert confirm_payload["result"]["intent"] == "APPLY_PATCH"
+    assert "patch_id" in confirm_payload["result"]["answer"]
     updated = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3").find_script_generation(
         generation["generation_id"]
     )
-    assert "火和烹饪让食物更容易消化" in updated["script"]["article"]
+    assert "火和烹饪让食物更容易消化" not in updated["script"]["article"]
     assert "这波不是迁徙，是人类大型开图。" in updated["script"]["article"]
 
     with sqlite3.connect(tmp_path / "outputs" / "material_workstation.sqlite3") as connection:
@@ -746,6 +791,348 @@ def test_script_rag_builds_vector_index_and_assists_rewrite(tmp_path):
             (generation["generation_id"],),
         ).fetchone()[0]
     assert message_count >= 6
+
+
+def test_smalltalk_does_not_create_patch(tmp_path, monkeypatch):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    def fail_search(*args, **kwargs):
+        raise AssertionError("SMALLTALK should not call RAG")
+
+    monkeypatch.setattr(LocalVectorStore, "search", fail_search)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "你好",
+            "selection": {
+                "text": "智人开局，装备一般",
+                "paragraph_id": "script-paragraph-1",
+                "start_offset": 0,
+                "end_offset": 8,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "SMALLTALK"
+    assert payload["result"]["replacement"] == ""
+    assert payload["result"]["patch_id"] is None
+    assert payload["result"]["needs_confirmation"] is False
+    assert payload["contexts"] == []
+    assert count_script_edit_patches(tmp_path / "outputs" / "material_workstation.sqlite3", generation["generation_id"]) == 0
+
+
+def test_selection_explain_does_not_create_patch(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "这段什么意思",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "EXPLAIN_SELECTION"
+    assert payload["result"]["replacement"] == ""
+    assert payload["result"]["patch_id"] is None
+    assert count_script_edit_patches(tmp_path / "outputs" / "material_workstation.sqlite3", generation["generation_id"]) == 0
+
+
+def test_review_selection_does_not_create_patch(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "这段哪里不好",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "REVIEW_SELECTION"
+    assert payload["result"]["replacement"] == ""
+    assert payload["result"]["patch_id"] is None
+    assert count_script_edit_patches(tmp_path / "outputs" / "material_workstation.sqlite3", generation["generation_id"]) == 0
+
+
+def test_propose_edit_creates_pending_patch(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "帮我润色这段",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+            "intent_hint": "edit",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    patch_id = payload["result"]["patch_id"]
+    assert payload["result"]["intent"] == "PROPOSE_EDIT"
+    assert payload["result"]["needs_confirmation"] is True
+    assert payload["result"]["replacement"] == "火和烹饪让食物更容易消化，也减少了咀嚼时间，于是更多能量可以供给大脑。"
+    patch = find_script_edit_patch(tmp_path / "outputs" / "material_workstation.sqlite3", patch_id)
+    assert patch["status"] == "pending"
+    assert patch["selection_hash"]
+    assert patch["article_version_hash"]
+    assert patch["paragraph_id"] == "script-paragraph-1"
+
+
+def test_plain_key_word_can_not_apply_patch(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    proposal = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "帮我润色这段",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+    assert proposal.status_code == 200
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"message": "可以"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "APPLY_PATCH"
+    assert payload["result"]["applied"] is False
+    assert "patch_id" in payload["result"]["answer"]
+    updated = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3").find_script_generation(
+        generation["generation_id"]
+    )
+    assert "火和烹饪让食物更容易消化" not in updated["script"]["article"]
+
+
+def test_apply_patch_requires_patch_id(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"message": "按这个改", "intent_hint": "apply_patch"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "APPLY_PATCH"
+    assert payload["result"]["applied"] is False
+    assert payload["result"]["patch_id"] is None
+    assert "patch_id" in payload["result"]["answer"]
+
+
+def test_apply_patch_checks_article_hash_or_unique_selection(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    proposal = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "帮我润色这段",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+    patch_id = proposal.get_json()["result"]["patch_id"]
+    client.patch(
+        f"/api/script/generations/{generation['generation_id']}/article",
+        json={"article": generation["script"]["article"] + "\n\n智人开局，装备一般"},
+    )
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"message": "应用这个修改", "intent_hint": "apply_patch", "patch_id": patch_id},
+    )
+
+    assert response.status_code == 409
+    payload = response.get_json()
+    assert payload["result"]["applied"] is False
+    assert payload["result"]["patch_id"] == patch_id
+    assert "无法唯一定位" in payload["result"]["answer"]
+
+
+def test_reject_patch_marks_rejected(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    proposal = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "message": "帮我润色这段",
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+        },
+    )
+    patch_id = proposal.get_json()["result"]["patch_id"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"message": "放弃这版", "intent_hint": "reject_patch", "patch_id": patch_id},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "REJECT_PATCH"
+    assert payload["result"]["applied"] is False
+    patch = find_script_edit_patch(tmp_path / "outputs" / "material_workstation.sqlite3", patch_id)
+    assert patch["status"] == "rejected"
+
+
+def test_rag_not_called_for_smalltalk(tmp_path, monkeypatch):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    calls = []
+
+    def fake_search(*args, **kwargs):
+        calls.append((args, kwargs))
+        return []
+
+    monkeypatch.setattr(LocalVectorStore, "search", fake_search)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"message": "这个功能怎么用"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["result"]["intent"] == "SMALLTALK"
+    assert calls == []
+
+
+def test_rag_called_for_source_question(tmp_path, monkeypatch):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    calls = []
+
+    def fake_search(self, query, *, record_ids=None, limit=6):
+        calls.append({"query": query, "record_ids": record_ids, "limit": limit})
+        return [{"chunk_id": "demo:1", "record_id": "demo", "text": "测试材料依据"}]
+
+    monkeypatch.setattr(LocalVectorStore, "search", fake_search)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"message": "这个说法有史实依据吗"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["intent"] == "ASK_SOURCE"
+    assert calls
+    assert payload["contexts"][0]["chunk_id"] == "demo:1"
 
 
 def test_script_assistant_keeps_conversation_context_between_turns(tmp_path):
@@ -781,7 +1168,7 @@ def test_script_assistant_keeps_conversation_context_between_turns(tmp_path):
     assert any(item["selection"] == "智人开局，装备一般" for item in conversation)
 
 
-def test_script_assistant_applies_pending_edit_when_user_says_start_modifying(tmp_path):
+def test_script_assistant_applies_pending_edit_only_with_patch_id(tmp_path):
     library = tmp_path / "资料库"
     library.mkdir()
     create_pdf(library / "demo.pdf")
@@ -801,15 +1188,17 @@ def test_script_assistant_applies_pending_edit_when_user_says_start_modifying(tm
         f"/api/script/generations/{generation['generation_id']}/assist",
         json={"selection": "智人开局，装备一般", "instruction": "为我修改这里，加上疑问句开头"},
     )
+    patch_id = assist_response.get_json()["result"]["patch_id"]
     apply_response = client.post(
         f"/api/script/generations/{generation['generation_id']}/assist",
-        json={"selection": "", "instruction": "那请你开始为我修改"},
+        json={"message": "应用这个修改", "intent_hint": "apply_patch", "patch_id": patch_id},
     )
 
     assert assist_response.status_code == 200
     assert apply_response.status_code == 200
     payload = apply_response.get_json()
     assert payload["result"]["applied"] is True
+    assert payload["result"]["patch_id"] == patch_id
     updated = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3").find_script_generation(
         generation["generation_id"]
     )
@@ -877,6 +1266,7 @@ def test_timeline_generation_updates_material_vector_index(tmp_path):
 def test_script_reader_uses_chinese_article_typography():
     styles = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "styles.css").read_text(encoding="utf-8")
     reader_script = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "script_reader.js").read_text(encoding="utf-8")
+    template = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "templates" / "script_generation_view.html").read_text(encoding="utf-8")
     article_rule = styles[styles.index(".script-article-card p {") : styles.index(".script-article-card p:last-child")]
     article_card_rule = styles[styles.index(".script-article-card {") : styles.index(".script-article-card p {")]
     page_shell_rule = styles[styles.index(".script-page-shell {") : styles.index(".script-page-hero")]
@@ -914,10 +1304,23 @@ def test_script_reader_uses_chinese_article_typography():
     assert "isPointerSelecting" in reader_script
     assert "选中内容：" not in reader_script
     assert "我的要求：" not in reader_script
-    assert "formatSelectedQuote" in reader_script
-    assert "stripSelectedQuoteFromInstruction" in reader_script
+    assert "formatSelectedQuote" not in reader_script
+    assert "stripSelectedQuoteFromInstruction" not in reader_script
     assert "loadSelectionHistory" in reader_script
     assert "/assist/history" in reader_script
+    assert "ragComposer.value = selectedText" not in reader_script
+    assert "data-selection-card" in template
+    assert "data-selection-summary" in template
+    assert "data-selection-explain" in template
+    assert "data-selection-review" in template
+    assert "data-selection-edit" in template
+    assert "data-selection-clear" in template
+    assert ".script-selection-card" in styles
+    assert "sendAssistantMessage" in reader_script
+    assert "intent_hint" in reader_script
+    assert "applyPatch" in reader_script
+    assert "rejectPatch" in reader_script
+    assert "patch_id" in reader_script
 
 
 def test_timeline_api_can_force_rebuild_existing_timeline(tmp_path):
