@@ -258,6 +258,56 @@ def create_app(
         count = LocalVectorStore(rag_database_path).replace_record_chunks(record_ids, chunks)
         return jsonify({"generation_id": generation_id, "chunk_count": count})
 
+    @app.route("/api/script/generations/<generation_id>/assistant/conversations", methods=["GET"])
+    def list_script_assistant_conversations(generation_id: str):
+        database = MaterialDatabase(database_path)
+        if not database.find_script_generation(generation_id):
+            abort(404)
+        return jsonify({"conversations": database.list_script_assistant_conversations(generation_id)})
+
+    @app.route("/api/script/generations/<generation_id>/assistant/conversations", methods=["POST"])
+    def create_script_assistant_conversation(generation_id: str):
+        payload = request.get_json(silent=True) or {}
+        database = MaterialDatabase(database_path)
+        if not database.find_script_generation(generation_id):
+            abort(404)
+        conversation = database.create_script_assistant_conversation(
+            generation_id,
+            title=str(payload.get("title") or ""),
+        )
+        return jsonify({"conversation": conversation})
+
+    @app.route("/api/script/generations/<generation_id>/assistant/conversations/<conversation_id>", methods=["GET"])
+    def get_script_assistant_conversation(generation_id: str, conversation_id: str):
+        database = MaterialDatabase(database_path)
+        if not database.find_script_generation(generation_id):
+            abort(404)
+        conversation = database.find_script_assistant_conversation(generation_id, conversation_id)
+        if not conversation:
+            abort(404)
+        messages = database.list_script_assistant_messages(
+            generation_id,
+            conversation_id=conversation_id,
+            limit=None,
+        )
+        return jsonify(
+            {
+                "conversation": conversation,
+                "messages": [assistant_history_message(message) for message in messages],
+            }
+        )
+
+    @app.route("/api/script/generations/<generation_id>/assistant/conversations/<conversation_id>", methods=["DELETE"])
+    def delete_script_assistant_conversation(generation_id: str, conversation_id: str):
+        database = MaterialDatabase(database_path)
+        if not database.find_script_generation(generation_id):
+            abort(404)
+        try:
+            conversation = database.archive_script_assistant_conversation(generation_id, conversation_id)
+        except KeyError:
+            abort(404)
+        return jsonify({"conversation": conversation, "deleted": conversation_id})
+
     @app.route("/api/script/generations/<generation_id>/assist", methods=["POST"])
     def assist_script_edit(generation_id: str):
         payload = request.get_json(silent=True) or {}
@@ -278,6 +328,25 @@ def create_app(
         if generation:
             sync_script_generation_files(generation)
         return jsonify(response_payload), status
+
+    @app.route("/api/script/generations/<generation_id>/assistant/selection-history", methods=["POST"])
+    def script_assistant_selection_history(generation_id: str):
+        payload = request.get_json(silent=True) or {}
+        selection = str(payload.get("selection") or "")
+        limit = int(payload.get("limit") or 20)
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        messages = database.list_script_assistant_messages_for_selection(generation_id, selection, limit=limit)
+        return jsonify(
+            {
+                "generation_id": generation_id,
+                "selection": selection,
+                "match_count": len(messages),
+                "messages": [assistant_history_message(message) for message in messages],
+            }
+        )
 
     @app.route("/api/script/generations/<generation_id>/assist/history", methods=["POST"])
     def script_assistant_history(generation_id: str):
@@ -457,12 +526,22 @@ def is_edit_confirmation(text: str) -> bool:
 def assistant_history_message(message: dict) -> dict:
     result = message.get("result") if isinstance(message.get("result"), dict) else {}
     return {
+        "message_id": message.get("message_id"),
+        "conversation_id": message.get("conversation_id", ""),
         "role": message.get("role", ""),
         "content": message.get("content", ""),
+        "intent": message.get("intent", ""),
         "selection": message.get("selection", ""),
+        "selection_text": message.get("selection", ""),
+        "selection_hash": message.get("selection_hash", ""),
+        "paragraph_id": message.get("paragraph_id", ""),
+        "start_offset": message.get("start_offset"),
+        "end_offset": message.get("end_offset"),
         "replacement": result.get("replacement", ""),
-        "patch_id": result.get("patch_id") or result.get("pending_edit_id"),
+        "patch_id": message.get("patch_id") or result.get("patch_id") or result.get("pending_edit_id"),
         "applied": bool(result.get("applied")) if result else False,
+        "rejected": bool(result.get("rejected")) if result else False,
+        "used_context_ids": result.get("used_context_ids", []) if result else [],
         "created_at": message.get("created_at", ""),
     }
 

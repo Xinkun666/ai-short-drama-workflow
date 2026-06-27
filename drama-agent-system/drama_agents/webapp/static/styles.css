@@ -1274,7 +1274,7 @@ h1 {
   min-height: 0;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto auto minmax(220px, 1fr) auto auto;
+  grid-template-rows: auto auto auto auto minmax(200px, 1fr) auto auto;
   gap: 12px;
 }
 
@@ -1295,6 +1295,83 @@ h1 {
   color: var(--muted);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.script-conversation-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+  padding: 10px 12px;
+}
+
+.script-conversation-bar strong {
+  min-width: 0;
+  color: #22303a;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.script-conversation-bar div {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.script-conversation-list {
+  max-height: 210px;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px;
+}
+
+.script-conversation-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid #edf1ee;
+  border-radius: 8px;
+  background: #fbfcfb;
+  padding: 8px;
+}
+
+.script-conversation-item.active {
+  border-color: rgba(22, 163, 74, 0.32);
+  background: var(--soft-green);
+}
+
+.script-conversation-item button {
+  min-height: 30px;
+}
+
+.script-conversation-meta strong,
+.script-conversation-meta span,
+.script-conversation-meta small {
+  display: block;
+}
+
+.script-conversation-meta strong {
+  color: var(--ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.script-conversation-meta span,
+.script-conversation-meta small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .script-selection-card {
@@ -1321,7 +1398,7 @@ h1 {
 
 .script-selection-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1330,6 +1407,20 @@ h1 {
   min-height: 34px;
   padding: 0 8px;
   font-size: 12px;
+}
+
+.script-selection-history {
+  max-height: 150px;
+  overflow-y: auto;
+  border-top: 1px solid rgba(22, 163, 74, 0.16);
+  padding-top: 8px;
+  color: #30414d;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.script-selection-history p {
+  margin: 0 0 6px;
 }
 
 .script-rag-chat {

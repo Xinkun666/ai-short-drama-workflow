@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 class MaterialDatabase:
@@ -130,17 +132,40 @@ class MaterialDatabase:
                 CREATE TABLE IF NOT EXISTS script_assistant_messages (
                     message_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     generation_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL DEFAULT '',
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
                     selection_text TEXT NOT NULL DEFAULT '',
+                    intent TEXT NOT NULL DEFAULT '',
+                    patch_id INTEGER,
+                    selection_hash TEXT NOT NULL DEFAULT '',
+                    paragraph_id TEXT NOT NULL DEFAULT '',
+                    start_offset INTEGER,
+                    end_offset INTEGER,
                     result_json TEXT NOT NULL DEFAULT '{}',
                     contexts_json TEXT NOT NULL DEFAULT '[]',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS script_assistant_conversations (
+                    conversation_id TEXT PRIMARY KEY,
+                    generation_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_message_preview TEXT NOT NULL DEFAULT '',
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    is_archived INTEGER NOT NULL DEFAULT 0,
+                    session_summary TEXT NOT NULL DEFAULT '',
+                    style_preferences_json TEXT NOT NULL DEFAULT '[]',
+                    active_patch_id INTEGER,
+                    active_selection_id TEXT NOT NULL DEFAULT ''
+                );
+
                 CREATE TABLE IF NOT EXISTS script_edit_patches (
                     patch_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     generation_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL DEFAULT '',
                     selection_text TEXT NOT NULL,
                     replacement_text TEXT NOT NULL,
                     selection_hash TEXT NOT NULL DEFAULT '',
@@ -173,14 +198,36 @@ class MaterialDatabase:
                     ON script_generations(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_script_assistant_messages_generation
                     ON script_assistant_messages(generation_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_script_assistant_conversations_generation
+                    ON script_assistant_conversations(generation_id, is_archived, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_script_edit_patches_generation
                     ON script_edit_patches(generation_id, status, created_at);
                 """
             )
             ensure_table_columns(
                 connection,
+                "script_assistant_messages",
+                {
+                    "conversation_id": "TEXT NOT NULL DEFAULT ''",
+                    "intent": "TEXT NOT NULL DEFAULT ''",
+                    "patch_id": "INTEGER",
+                    "selection_hash": "TEXT NOT NULL DEFAULT ''",
+                    "paragraph_id": "TEXT NOT NULL DEFAULT ''",
+                    "start_offset": "INTEGER",
+                    "end_offset": "INTEGER",
+                },
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_script_assistant_messages_conversation
+                    ON script_assistant_messages(conversation_id, message_id)
+                """
+            )
+            ensure_table_columns(
+                connection,
                 "script_edit_patches",
                 {
+                    "conversation_id": "TEXT NOT NULL DEFAULT ''",
                     "selection_hash": "TEXT NOT NULL DEFAULT ''",
                     "paragraph_id": "TEXT NOT NULL DEFAULT ''",
                     "start_offset": "INTEGER",
@@ -188,6 +235,7 @@ class MaterialDatabase:
                     "article_version_hash": "TEXT NOT NULL DEFAULT ''",
                 },
             )
+            self.ensure_legacy_script_assistant_conversations(connection)
 
     def upsert_parse(self, record: dict[str, Any], result_data: dict[str, Any]) -> dict[str, Any]:
         normalized_record = normalize_record(record)
@@ -442,45 +490,302 @@ class MaterialDatabase:
             connection.execute("DELETE FROM script_generations WHERE generation_id = ?", (generation_id,))
         return self.list_script_generations()
 
+    def ensure_legacy_script_assistant_conversations(self, connection: sqlite3.Connection) -> None:
+        rows = connection.execute(
+            """
+            SELECT generation_id, COUNT(*) AS message_count, MAX(created_at) AS updated_at
+            FROM script_assistant_messages
+            WHERE conversation_id = ''
+            GROUP BY generation_id
+            """
+        ).fetchall()
+        for row in rows:
+            generation_id = row["generation_id"]
+            conversation_id = f"legacy-{generation_id}"
+            latest = connection.execute(
+                """
+                SELECT content, created_at FROM script_assistant_messages
+                WHERE generation_id = ? AND conversation_id = ''
+                ORDER BY message_id DESC
+                LIMIT 1
+                """,
+                (generation_id,),
+            ).fetchone()
+            first = connection.execute(
+                """
+                SELECT created_at FROM script_assistant_messages
+                WHERE generation_id = ? AND conversation_id = ''
+                ORDER BY message_id ASC
+                LIMIT 1
+                """,
+                (generation_id,),
+            ).fetchone()
+            created_at = first["created_at"] if first else current_timestamp()
+            updated_at = latest["created_at"] if latest else row["updated_at"] or created_at
+            preview = preview_text(latest["content"] if latest else "")
+            connection.execute(
+                """
+                INSERT INTO script_assistant_conversations (
+                    conversation_id, generation_id, title, created_at, updated_at,
+                    last_message_preview, message_count, is_archived
+                ) VALUES (?, ?, '旧对话', ?, ?, ?, ?, 0)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    generation_id=excluded.generation_id,
+                    updated_at=excluded.updated_at,
+                    last_message_preview=excluded.last_message_preview,
+                    message_count=excluded.message_count
+                """,
+                (conversation_id, generation_id, created_at, updated_at, preview, int(row["message_count"] or 0)),
+            )
+            connection.execute(
+                """
+                UPDATE script_assistant_messages
+                SET conversation_id = ?
+                WHERE generation_id = ? AND conversation_id = ''
+                """,
+                (conversation_id, generation_id),
+            )
+
+    def create_script_assistant_conversation(self, generation_id: str, *, title: str = "") -> dict[str, Any]:
+        conversation_id = f"conv-{uuid4().hex}"
+        now = current_timestamp()
+        clean_title = title.strip() or "新对话"
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO script_assistant_conversations (
+                    conversation_id, generation_id, title, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (conversation_id, generation_id, clean_title, now, now),
+            )
+        conversation = self.find_script_assistant_conversation(generation_id, conversation_id)
+        if not conversation:
+            raise KeyError(conversation_id)
+        return conversation
+
+    def list_script_assistant_conversations(
+        self,
+        generation_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            self.ensure_legacy_script_assistant_conversations(connection)
+            if include_archived:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM script_assistant_conversations
+                    WHERE generation_id = ?
+                    ORDER BY updated_at DESC, conversation_id DESC
+                    """,
+                    (generation_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM script_assistant_conversations
+                    WHERE generation_id = ? AND is_archived = 0
+                    ORDER BY updated_at DESC, conversation_id DESC
+                    """,
+                    (generation_id,),
+                ).fetchall()
+        return [script_assistant_conversation_from_row(row) for row in rows]
+
+    def find_script_assistant_conversation(
+        self,
+        generation_id: str,
+        conversation_id: str,
+        *,
+        include_archived: bool = False,
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            self.ensure_legacy_script_assistant_conversations(connection)
+            if include_archived:
+                row = connection.execute(
+                    """
+                    SELECT * FROM script_assistant_conversations
+                    WHERE generation_id = ? AND conversation_id = ?
+                    """,
+                    (generation_id, conversation_id),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT * FROM script_assistant_conversations
+                    WHERE generation_id = ? AND conversation_id = ? AND is_archived = 0
+                    """,
+                    (generation_id, conversation_id),
+                ).fetchone()
+        return script_assistant_conversation_from_row(row) if row else None
+
+    def archive_script_assistant_conversation(self, generation_id: str, conversation_id: str) -> dict[str, Any]:
+        now = current_timestamp()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE script_assistant_conversations
+                SET is_archived = 1,
+                    updated_at = ?
+                WHERE generation_id = ? AND conversation_id = ?
+                """,
+                (now, generation_id, conversation_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(conversation_id)
+        conversation = self.find_script_assistant_conversation(
+            generation_id,
+            conversation_id,
+            include_archived=True,
+        )
+        if not conversation:
+            raise KeyError(conversation_id)
+        return conversation
+
+    def update_script_assistant_conversation_state(
+        self,
+        generation_id: str,
+        conversation_id: str,
+        *,
+        session_summary: str = "",
+        style_preferences: list[str] | None = None,
+        active_patch_id: int | None = None,
+        active_selection_id: str = "",
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE script_assistant_conversations
+                SET session_summary = ?,
+                    style_preferences_json = ?,
+                    active_patch_id = ?,
+                    active_selection_id = ?,
+                    updated_at = ?
+                WHERE generation_id = ? AND conversation_id = ?
+                """,
+                (
+                    session_summary,
+                    json_dumps(style_preferences or []),
+                    active_patch_id,
+                    active_selection_id,
+                    current_timestamp(),
+                    generation_id,
+                    conversation_id,
+                ),
+            )
+        conversation = self.find_script_assistant_conversation(generation_id, conversation_id)
+        if not conversation:
+            raise KeyError(conversation_id)
+        return conversation
+
     def add_script_assistant_message(
         self,
         *,
         generation_id: str,
+        conversation_id: str = "",
         role: str,
         content: str,
         selection: str = "",
+        intent: str = "",
+        patch_id: int | None = None,
+        selection_hash: str = "",
+        paragraph_id: str = "",
+        start_offset: int | None = None,
+        end_offset: int | None = None,
         result: dict[str, Any] | None = None,
         contexts: list[dict[str, Any]] | None = None,
     ) -> int:
+        now = current_timestamp()
         with self.connect() as connection:
+            if conversation_id:
+                conversation = connection.execute(
+                    """
+                    SELECT * FROM script_assistant_conversations
+                    WHERE generation_id = ? AND conversation_id = ? AND is_archived = 0
+                    """,
+                    (generation_id, conversation_id),
+                ).fetchone()
+                if not conversation:
+                    raise KeyError(conversation_id)
+            else:
+                conversation = None
             cursor = connection.execute(
                 """
                 INSERT INTO script_assistant_messages (
-                    generation_id, role, content, selection_text, result_json, contexts_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    generation_id, conversation_id, role, content, selection_text, intent,
+                    patch_id, selection_hash, paragraph_id, start_offset, end_offset,
+                    result_json, contexts_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     generation_id,
+                    conversation_id,
                     role,
                     content,
                     selection,
+                    intent,
+                    patch_id,
+                    selection_hash,
+                    paragraph_id,
+                    start_offset,
+                    end_offset,
                     json_dumps(result or {}),
                     json_dumps(contexts or []),
+                    now,
                 ),
             )
+            if conversation_id:
+                message_count = int(conversation["message_count"] or 0) + 1 if conversation else 1
+                title = conversation["title"] if conversation else "新对话"
+                if role == "user" and title in {"", "新对话"}:
+                    title = conversation_title_from_message(content, intent=intent, paragraph_id=paragraph_id)
+                connection.execute(
+                    """
+                    UPDATE script_assistant_conversations
+                    SET title = ?,
+                        updated_at = ?,
+                        last_message_preview = ?,
+                        message_count = ?
+                    WHERE generation_id = ? AND conversation_id = ?
+                    """,
+                    (
+                        title,
+                        now,
+                        preview_text(content),
+                        message_count,
+                        generation_id,
+                        conversation_id,
+                    ),
+                )
             return int(cursor.lastrowid)
 
-    def list_script_assistant_messages(self, generation_id: str, *, limit: int = 12) -> list[dict[str, Any]]:
+    def list_script_assistant_messages(
+        self,
+        generation_id: str,
+        *,
+        conversation_id: str | None = None,
+        limit: int | None = 12,
+    ) -> list[dict[str, Any]]:
         with self.connect() as connection:
-            rows = connection.execute(
+            self.ensure_legacy_script_assistant_conversations(connection)
+            if conversation_id is not None:
+                query = """
+                    SELECT * FROM script_assistant_messages
+                    WHERE generation_id = ? AND conversation_id = ?
+                    ORDER BY message_id DESC
                 """
-                SELECT * FROM script_assistant_messages
-                WHERE generation_id = ?
-                ORDER BY message_id DESC
-                LIMIT ?
-                """,
-                (generation_id, limit),
-            ).fetchall()
+                params: tuple[Any, ...] = (generation_id, conversation_id)
+            else:
+                query = """
+                    SELECT * FROM script_assistant_messages
+                    WHERE generation_id = ?
+                    ORDER BY message_id DESC
+                """
+                params = (generation_id,)
+            if limit is not None:
+                query = f"{query} LIMIT ?"
+                params = (*params, limit)
+            rows = connection.execute(query, params).fetchall()
         messages = [script_assistant_message_from_row(row) for row in rows]
         messages.reverse()
         return messages
@@ -496,6 +801,7 @@ class MaterialDatabase:
         if not target_key:
             return []
         with self.connect() as connection:
+            self.ensure_legacy_script_assistant_conversations(connection)
             rows = connection.execute(
                 """
                 SELECT * FROM script_assistant_messages
@@ -514,6 +820,7 @@ class MaterialDatabase:
         self,
         *,
         generation_id: str,
+        conversation_id: str = "",
         selection: str,
         replacement: str,
         answer: str = "",
@@ -527,12 +834,13 @@ class MaterialDatabase:
             cursor = connection.execute(
                 """
                 INSERT INTO script_edit_patches (
-                    generation_id, selection_text, replacement_text, selection_hash,
+                    generation_id, conversation_id, selection_text, replacement_text, selection_hash,
                     paragraph_id, start_offset, end_offset, article_version_hash, answer, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
                 """,
                 (
                     generation_id,
+                    conversation_id,
                     selection,
                     replacement,
                     selection_hash,
@@ -553,17 +861,33 @@ class MaterialDatabase:
             ).fetchone()
         return script_edit_patch_from_row(row) if row else None
 
-    def latest_pending_script_edit_patch(self, generation_id: str) -> dict[str, Any] | None:
+    def latest_pending_script_edit_patch(
+        self,
+        generation_id: str,
+        *,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any] | None:
         with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT * FROM script_edit_patches
-                WHERE generation_id = ? AND status = 'pending'
-                ORDER BY patch_id DESC
-                LIMIT 1
-                """,
-                (generation_id,),
-            ).fetchone()
+            if conversation_id is None:
+                row = connection.execute(
+                    """
+                    SELECT * FROM script_edit_patches
+                    WHERE generation_id = ? AND status = 'pending'
+                    ORDER BY patch_id DESC
+                    LIMIT 1
+                    """,
+                    (generation_id,),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT * FROM script_edit_patches
+                    WHERE generation_id = ? AND conversation_id = ? AND status = 'pending'
+                    ORDER BY patch_id DESC
+                    LIMIT 1
+                    """,
+                    (generation_id, conversation_id),
+                ).fetchone()
         return script_edit_patch_from_row(row) if row else None
 
     def mark_generation_pending_patches_stale(self, generation_id: str, *, except_patch_id: int | None = None) -> None:
@@ -924,12 +1248,36 @@ def script_assistant_message_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "message_id": row["message_id"],
         "generation_id": row["generation_id"],
+        "conversation_id": row["conversation_id"],
         "role": row["role"],
         "content": row["content"],
         "selection": row["selection_text"],
+        "intent": row["intent"],
+        "patch_id": row["patch_id"],
+        "selection_hash": row["selection_hash"],
+        "paragraph_id": row["paragraph_id"],
+        "start_offset": row["start_offset"],
+        "end_offset": row["end_offset"],
         "result": json_loads(row["result_json"], default={}),
         "contexts": json_loads(row["contexts_json"], default=[]),
         "created_at": row["created_at"],
+    }
+
+
+def script_assistant_conversation_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "conversation_id": row["conversation_id"],
+        "generation_id": row["generation_id"],
+        "title": row["title"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "last_message_preview": row["last_message_preview"],
+        "message_count": row["message_count"],
+        "is_archived": bool(row["is_archived"]),
+        "session_summary": row["session_summary"],
+        "style_preferences": json_loads(row["style_preferences_json"], default=[]),
+        "active_patch_id": row["active_patch_id"],
+        "active_selection_id": row["active_selection_id"],
     }
 
 
@@ -937,6 +1285,7 @@ def script_edit_patch_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "patch_id": row["patch_id"],
         "generation_id": row["generation_id"],
+        "conversation_id": row["conversation_id"],
         "selection": row["selection_text"],
         "replacement": row["replacement_text"],
         "selection_hash": row["selection_hash"],
@@ -1027,3 +1376,29 @@ def ensure_table_columns(connection: sqlite3.Connection, table: str, columns: di
     for name, ddl in columns.items():
         if name not in existing:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def current_timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
+def preview_text(value: str, *, limit: int = 80) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit]
+
+
+def conversation_title_from_message(content: str, *, intent: str = "", paragraph_id: str = "") -> str:
+    paragraph = paragraph_number(paragraph_id)
+    if intent == "EXPLAIN_SELECTION" and paragraph:
+        return f"解释第 {paragraph} 段"
+    if intent == "REVIEW_SELECTION" and paragraph:
+        return f"评审第 {paragraph} 段"
+    if intent in {"PROPOSE_EDIT", "REVISE_PENDING"} and paragraph:
+        return f"修改第 {paragraph} 段"
+    clean = preview_text(content, limit=20)
+    return clean or "新对话"
+
+
+def paragraph_number(paragraph_id: str) -> str:
+    match = re.search(r"(\d+)$", str(paragraph_id or ""))
+    return match.group(1) if match else ""

@@ -38,6 +38,7 @@ class AssistantSelection:
 class AssistantRequest:
     message: str
     selection: AssistantSelection
+    conversation_id: str = ""
     intent_hint: str = ""
     patch_id: int | None = None
 
@@ -88,18 +89,27 @@ class ScriptAssistantIntentRouter:
 
 
 class ScriptAssistantMemory:
-    def __init__(self, database: MaterialDatabase, generation_id: str):
+    def __init__(self, database: MaterialDatabase, generation_id: str, conversation: dict[str, Any]):
         self.database = database
         self.generation_id = generation_id
-        self.state = database.get_script_assistant_state(generation_id)
+        self.conversation_id = str(conversation.get("conversation_id") or "")
+        self.state = conversation
 
     def active_patch(self) -> dict[str, Any] | None:
         patch_id = self.state.get("active_patch_id")
         if patch_id:
             patch = self.database.find_script_edit_patch(int(patch_id))
-            if patch and patch.get("generation_id") == self.generation_id and patch.get("status") == "pending":
+            if (
+                patch
+                and patch.get("generation_id") == self.generation_id
+                and patch.get("conversation_id") == self.conversation_id
+                and patch.get("status") == "pending"
+            ):
                 return patch
-        patch = self.database.latest_pending_script_edit_patch(self.generation_id)
+        patch = self.database.latest_pending_script_edit_patch(
+            self.generation_id,
+            conversation_id=self.conversation_id,
+        )
         if patch and patch.get("status") == "pending":
             return patch
         return None
@@ -125,12 +135,11 @@ class ScriptAssistantMemory:
             summary_parts.append(accepted_or_rejected)
         if preferences:
             summary_parts.append("偏好：" + "、".join(preferences[-6:]))
-        self.state = self.database.upsert_script_assistant_state(
+        self.state = self.database.update_script_assistant_conversation_state(
             self.generation_id,
-            active_intent=intent,
+            self.conversation_id,
             active_selection_id=(selection.selection_id if selection and selection.text else ""),
             active_patch_id=patch_id,
-            article_version_hash=article_version_hash,
             session_summary="；".join(summary_parts),
             style_preferences=preferences[-12:],
         )
@@ -159,10 +168,16 @@ class ScriptAssistantController:
         generation = self.database.find_script_generation(generation_id)
         if not generation:
             raise KeyError(generation_id)
+        if request.conversation_id:
+            conversation = self.database.find_script_assistant_conversation(generation_id, request.conversation_id)
+            if not conversation:
+                return {"error": "对话不存在或已删除"}, 404
+        else:
+            conversation = self.database.create_script_assistant_conversation(generation_id)
 
         article = script_article(generation)
         article_hash = article_version_hash(article)
-        memory = ScriptAssistantMemory(self.database, generation_id)
+        memory = ScriptAssistantMemory(self.database, generation_id, conversation)
         active_patch = memory.active_patch()
         intent = self.router.classify(
             message=request.message,
@@ -174,9 +189,16 @@ class ScriptAssistantController:
         effective_selection = selection_for_intent(intent, request.selection, active_patch)
         self.database.add_script_assistant_message(
             generation_id=generation_id,
+            conversation_id=conversation["conversation_id"],
             role="user",
             content=request.message,
             selection=effective_selection.text if intent_uses_selection(intent) else "",
+            intent=intent,
+            patch_id=request.patch_id,
+            selection_hash=text_hash(effective_selection.text) if effective_selection.text else "",
+            paragraph_id=effective_selection.paragraph_id,
+            start_offset=effective_selection.start_offset,
+            end_offset=effective_selection.end_offset,
         )
 
         if intent == SMALLTALK:
@@ -185,13 +207,20 @@ class ScriptAssistantController:
                 answer=smalltalk_answer(request.message, has_selection=bool(request.selection.text)),
             )
             memory.update(intent=intent, article_version_hash=article_hash, user_message=request.message)
-            self._save_assistant_message(generation_id, result, effective_selection, [])
+            memory.state = self._save_assistant_message(
+                generation_id,
+                conversation["conversation_id"],
+                result,
+                effective_selection,
+                [],
+            )
             return self._payload(result, [], memory.state), 200
 
         if intent == APPLY_PATCH:
             result, status, updated_generation = self._apply_patch(
                 generation_id=generation_id,
                 patch_id=request.patch_id,
+                conversation_id=conversation["conversation_id"],
                 current_generation=generation,
                 article_hash=article_hash,
             )
@@ -201,14 +230,20 @@ class ScriptAssistantController:
                 user_message=request.message,
                 accepted_or_rejected="已应用候选修改" if result.get("applied") else "",
             )
-            self._save_assistant_message(generation_id, result, effective_selection, [])
+            memory.state = self._save_assistant_message(
+                generation_id,
+                conversation["conversation_id"],
+                result,
+                effective_selection,
+                [],
+            )
             payload = self._payload(result, [], memory.state)
             if updated_generation:
                 payload["generation"] = updated_generation
             return payload, status
 
         if intent == REJECT_PATCH:
-            result = self._reject_patch(generation_id, request.patch_id, active_patch)
+            result = self._reject_patch(generation_id, conversation["conversation_id"], request.patch_id, active_patch)
             memory.update(
                 intent=intent,
                 patch_id=None,
@@ -216,7 +251,13 @@ class ScriptAssistantController:
                 user_message=request.message,
                 accepted_or_rejected="已放弃候选修改" if result.get("rejected") else "",
             )
-            self._save_assistant_message(generation_id, result, effective_selection, [])
+            memory.state = self._save_assistant_message(
+                generation_id,
+                conversation["conversation_id"],
+                result,
+                effective_selection,
+                [],
+            )
             return self._payload(result, [], memory.state), 200
 
         if intent in {PROPOSE_EDIT, REVISE_PENDING} and not effective_selection.text:
@@ -225,18 +266,28 @@ class ScriptAssistantController:
                 answer="请先选中要修改的剧本文字，或点击某条候选修改继续调整。",
             )
             memory.update(intent=intent, article_version_hash=article_hash, user_message=request.message)
-            self._save_assistant_message(generation_id, result, effective_selection, [])
+            memory.state = self._save_assistant_message(
+                generation_id,
+                conversation["conversation_id"],
+                result,
+                effective_selection,
+                [],
+            )
             return self._payload(result, [], memory.state), 200
 
         contexts = self._contexts_for_intent(intent, request.message, effective_selection, generation)
-        conversation = self.database.list_script_assistant_messages(generation_id, limit=12)
+        recent_messages = self.database.list_script_assistant_messages(
+            generation_id,
+            conversation_id=conversation["conversation_id"],
+            limit=12,
+        )
         try:
             result = self.script_agent.assist_edit(
                 generation=generation,
                 selection=effective_selection.text,
                 instruction=request.message,
                 contexts=contexts,
-                conversation=conversation,
+                conversation=recent_messages,
                 pending_edit=active_patch if intent == REVISE_PENDING else None,
                 intent=intent,
                 memory=memory.state,
@@ -253,6 +304,7 @@ class ScriptAssistantController:
                 self.database.mark_script_edit_patch_status(int(active_patch["patch_id"]), "stale")
             patch_id = self.database.create_script_edit_patch(
                 generation_id=generation_id,
+                conversation_id=conversation["conversation_id"],
                 selection=effective_selection.text,
                 replacement=str(result["replacement"]),
                 answer=str(result.get("answer") or ""),
@@ -273,7 +325,13 @@ class ScriptAssistantController:
             article_version_hash=article_hash,
             user_message=request.message,
         )
-        self._save_assistant_message(generation_id, result, effective_selection, contexts)
+        memory.state = self._save_assistant_message(
+            generation_id,
+            conversation["conversation_id"],
+            result,
+            effective_selection,
+            contexts,
+        )
         return self._payload(result, contexts, memory.state), 200
 
     def _contexts_for_intent(
@@ -300,6 +358,7 @@ class ScriptAssistantController:
         *,
         generation_id: str,
         patch_id: int | None,
+        conversation_id: str,
         current_generation: dict[str, Any],
         article_hash: str,
     ) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
@@ -314,7 +373,7 @@ class ScriptAssistantController:
                 None,
             )
         patch = self.database.find_script_edit_patch(int(patch_id))
-        if not patch or patch.get("generation_id") != generation_id:
+        if not patch or patch.get("generation_id") != generation_id or patch.get("conversation_id") != conversation_id:
             return (
                 assistant_result(intent=APPLY_PATCH, answer=f"找不到 patch_id={patch_id} 的候选修改。", patch_id=patch_id),
                 404,
@@ -367,6 +426,7 @@ class ScriptAssistantController:
     def _reject_patch(
         self,
         generation_id: str,
+        conversation_id: str,
         patch_id: int | None,
         active_patch: dict[str, Any] | None,
     ) -> dict[str, Any]:
@@ -374,7 +434,7 @@ class ScriptAssistantController:
         if target_patch_id is None:
             return assistant_result(intent=REJECT_PATCH, answer="当前没有可放弃的候选修改。", rejected=False)
         patch = self.database.find_script_edit_patch(int(target_patch_id))
-        if not patch or patch.get("generation_id") != generation_id:
+        if not patch or patch.get("generation_id") != generation_id or patch.get("conversation_id") != conversation_id:
             return assistant_result(
                 intent=REJECT_PATCH,
                 answer=f"找不到 patch_id={target_patch_id} 的候选修改。",
@@ -392,23 +452,36 @@ class ScriptAssistantController:
     def _save_assistant_message(
         self,
         generation_id: str,
+        conversation_id: str,
         result: dict[str, Any],
         selection: AssistantSelection,
         contexts: list[dict[str, Any]],
-    ) -> None:
+    ) -> dict[str, Any]:
         self.database.add_script_assistant_message(
             generation_id=generation_id,
+            conversation_id=conversation_id,
             role="assistant",
             content=str(result.get("answer") or ""),
             selection=selection.text if intent_uses_selection(str(result.get("intent") or "")) else "",
+            intent=str(result.get("intent") or ""),
+            patch_id=parse_optional_int(result.get("patch_id")),
+            selection_hash=text_hash(selection.text) if selection.text else "",
+            paragraph_id=selection.paragraph_id,
+            start_offset=selection.start_offset,
+            end_offset=selection.end_offset,
             result=result,
             contexts=contexts,
         )
+        conversation = self.database.find_script_assistant_conversation(generation_id, conversation_id)
+        if not conversation:
+            raise KeyError(conversation_id)
+        return conversation
 
     def _payload(self, result: dict[str, Any], contexts: list[dict[str, Any]], state: dict[str, Any]) -> dict[str, Any]:
         return {
             "result": result,
             "contexts": contexts,
+            "conversation": state,
             "state": {
                 "active_patch_id": state.get("active_patch_id"),
                 "active_selection_id": state.get("active_selection_id"),
@@ -423,6 +496,7 @@ def normalize_assist_request(payload: dict[str, Any]) -> AssistantRequest:
     return AssistantRequest(
         message=message,
         selection=selection,
+        conversation_id=str(payload.get("conversation_id") or "").strip(),
         intent_hint=str(payload.get("intent_hint") or "").strip(),
         patch_id=parse_optional_int(payload.get("patch_id")),
     )

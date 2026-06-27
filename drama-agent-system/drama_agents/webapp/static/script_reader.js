@@ -15,14 +15,22 @@
   const ragComposer = root.querySelector("[data-rag-composer]");
   const ragAsk = root.querySelector("[data-rag-ask]");
   const ragStatus = root.querySelector("[data-rag-status]");
+  const conversationTitle = root.querySelector("[data-conversation-title]");
+  const conversationNew = root.querySelector("[data-conversation-new]");
+  const conversationToggle = root.querySelector("[data-conversation-toggle]");
+  const conversationList = root.querySelector("[data-conversation-list]");
   const selectionCard = root.querySelector("[data-selection-card]");
   const selectionSummary = root.querySelector("[data-selection-summary]");
   const selectionExplain = root.querySelector("[data-selection-explain]");
   const selectionReview = root.querySelector("[data-selection-review]");
   const selectionEdit = root.querySelector("[data-selection-edit]");
+  const selectionHistory = root.querySelector("[data-selection-history]");
+  const selectionHistoryPanel = root.querySelector("[data-selection-history-panel]");
   const selectionClear = root.querySelector("[data-selection-clear]");
   const initialChatHtml = ragChat.innerHTML;
   const defaultComposerPlaceholder = ragComposer.getAttribute("placeholder") || "";
+  let currentConversationId = "";
+  let conversations = [];
   let selectedText = "";
   let selectedSelection = null;
   let pendingSelectionIntent = "";
@@ -94,7 +102,6 @@
     pendingSelectionIntent = "";
     ragComposer.placeholder = defaultComposerPlaceholder;
     renderSelectionCard();
-    loadSelectionHistory(selectedText);
   }
 
   function syncSelectionAfterPointerUp() {
@@ -124,11 +131,14 @@
     if (selectionCard) {
       selectionCard.hidden = true;
     }
+    if (selectionHistoryPanel) {
+      selectionHistoryPanel.hidden = true;
+      selectionHistoryPanel.innerHTML = "";
+    }
     const selection = window.getSelection();
     if (selection) {
       selection.removeAllRanges();
     }
-    resetChatHistory();
     ragStatus.textContent = "";
   }
 
@@ -183,7 +193,11 @@
     ragChat.scrollTop = 0;
   }
 
-  function renderHistoryMessages(messages) {
+  function renderConversationMessages(messages) {
+    if (!messages.length) {
+      resetChatHistory();
+      return;
+    }
     ragChat.innerHTML = "";
     messages.forEach((message) => {
       addMessage(message.role, message.content, {
@@ -193,14 +207,135 @@
     });
   }
 
+  async function initializeConversations() {
+    await refreshConversationList();
+    if (conversations.length) {
+      await loadConversation(conversations[0].conversation_id);
+      return;
+    }
+    await createConversation("新对话", { load: true });
+  }
+
+  async function refreshConversationList() {
+    const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/assistant/conversations`);
+    const payload = await response.json();
+    if (!response.ok) {
+      ragStatus.textContent = payload.error || "对话列表加载失败";
+      return [];
+    }
+    conversations = payload.conversations || [];
+    renderConversationList();
+    return conversations;
+  }
+
+  function renderConversationList() {
+    conversationList.innerHTML = "";
+    if (!conversations.length) {
+      const empty = document.createElement("p");
+      empty.className = "muted-text";
+      empty.textContent = "暂无历史对话";
+      conversationList.appendChild(empty);
+      return;
+    }
+    conversations.forEach((conversation) => {
+      const item = document.createElement("div");
+      item.className = `script-conversation-item${conversation.conversation_id === currentConversationId ? " active" : ""}`;
+      const meta = document.createElement("button");
+      meta.className = "script-conversation-meta text-button";
+      meta.type = "button";
+      meta.addEventListener("click", () => loadConversation(conversation.conversation_id));
+      const title = document.createElement("strong");
+      title.textContent = conversation.title || "新对话";
+      const time = document.createElement("span");
+      time.textContent = conversation.updated_at || conversation.created_at || "";
+      const preview = document.createElement("small");
+      preview.textContent = conversation.last_message_preview || "还没有消息";
+      meta.append(title, time, preview);
+      const deleteButton = document.createElement("button");
+      deleteButton.className = "text-button";
+      deleteButton.type = "button";
+      deleteButton.textContent = "删除";
+      deleteButton.addEventListener("click", () => deleteConversation(conversation.conversation_id));
+      item.append(meta, deleteButton);
+      conversationList.appendChild(item);
+    });
+  }
+
+  async function createConversation(title, options) {
+    const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/assistant/conversations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: title || "新对话" }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      ragStatus.textContent = payload.error || "新建对话失败";
+      return null;
+    }
+    const conversation = payload.conversation;
+    currentConversationId = conversation.conversation_id;
+    conversationTitle.textContent = conversation.title || "新对话";
+    await refreshConversationList();
+    if (!options || options.load) {
+      resetChatHistory();
+    }
+    return conversation;
+  }
+
+  async function ensureConversation() {
+    if (currentConversationId) {
+      return currentConversationId;
+    }
+    const conversation = await createConversation("新对话", { load: false });
+    return conversation ? conversation.conversation_id : "";
+  }
+
+  async function loadConversation(conversationId) {
+    const response = await fetch(
+      `/api/script/generations/${encodeURIComponent(generationId)}/assistant/conversations/${encodeURIComponent(conversationId)}`
+    );
+    const payload = await response.json();
+    if (!response.ok) {
+      ragStatus.textContent = payload.error || "对话加载失败";
+      return;
+    }
+    currentConversationId = payload.conversation.conversation_id;
+    conversationTitle.textContent = payload.conversation.title || "新对话";
+    renderConversationMessages(payload.messages || []);
+    renderConversationList();
+    conversationList.hidden = true;
+    ragStatus.textContent = "";
+  }
+
+  async function deleteConversation(conversationId) {
+    const response = await fetch(
+      `/api/script/generations/${encodeURIComponent(generationId)}/assistant/conversations/${encodeURIComponent(conversationId)}`,
+      { method: "DELETE" }
+    );
+    const payload = await response.json();
+    if (!response.ok) {
+      ragStatus.textContent = payload.error || "删除对话失败";
+      return;
+    }
+    await refreshConversationList();
+    if (currentConversationId === conversationId) {
+      if (conversations.length) {
+        await loadConversation(conversations[0].conversation_id);
+      } else {
+        await createConversation("新对话", { load: true });
+      }
+    }
+  }
+
   async function loadSelectionHistory(selection) {
     const cleanSelection = selection.trim();
     if (!cleanSelection) {
       return;
     }
     const requestToken = ++historyRequestToken;
-    ragStatus.textContent = "正在恢复这段的历史对话...";
-    const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/assist/history`, {
+    selectionHistoryPanel.hidden = false;
+    selectionHistoryPanel.textContent = "正在查询这段相关历史...";
+    const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/assistant/selection-history`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ selection: cleanSelection }),
@@ -210,16 +345,19 @@
       return;
     }
     if (!response.ok) {
-      ragStatus.textContent = payload.error || "历史对话恢复失败";
+      selectionHistoryPanel.textContent = payload.error || "相关历史查询失败";
       return;
     }
     if (!payload.messages.length) {
-      resetChatHistory();
-      ragStatus.textContent = "这段还没有历史对话。";
+      selectionHistoryPanel.textContent = "这段还没有相关历史。";
       return;
     }
-    renderHistoryMessages(payload.messages);
-    ragStatus.textContent = `已恢复 ${payload.messages.length} 条历史对话`;
+    selectionHistoryPanel.innerHTML = "";
+    payload.messages.forEach((message) => {
+      const item = document.createElement("p");
+      item.textContent = `${message.role === "user" ? "你" : "AI"}：${message.content}`;
+      selectionHistoryPanel.appendChild(item);
+    });
   }
 
   async function saveArticle() {
@@ -253,7 +391,11 @@
   }
 
   async function sendAssistantMessage(message, intentHint, includeSelection, patchId) {
-    const body = { message };
+    const conversationId = await ensureConversation();
+    if (!conversationId) {
+      return;
+    }
+    const body = { conversation_id: conversationId, message };
     if (intentHint) {
       body.intent_hint = intentHint;
     }
@@ -275,8 +417,13 @@
       ragStatus.textContent = payload.error || "剧本对话助手调用失败";
       return;
     }
+    if (payload.conversation) {
+      currentConversationId = payload.conversation.conversation_id;
+      conversationTitle.textContent = payload.conversation.title || "新对话";
+    }
     const result = payload.result || {};
     addMessage("assistant", result.answer || "已处理。", result);
+    await refreshConversationList();
     if (result.applied) {
       ragStatus.textContent = "已保存修改，正在刷新正文...";
       window.setTimeout(() => window.location.reload(), 450);
@@ -330,6 +477,10 @@
     setEditMode(false);
   });
   editSave.addEventListener("click", saveArticle);
+  conversationNew.addEventListener("click", () => createConversation("新对话", { load: true }));
+  conversationToggle.addEventListener("click", () => {
+    conversationList.hidden = !conversationList.hidden;
+  });
   ragAsk.addEventListener("click", askAgent);
   ragComposer.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -355,6 +506,11 @@
     ragComposer.value = "";
     sendAssistantMessage(message, "edit", true);
   });
+  selectionHistory.addEventListener("click", () => {
+    if (requireSelection()) {
+      loadSelectionHistory(selectedSelection.text);
+    }
+  });
   selectionClear.addEventListener("click", clearSelection);
   display.addEventListener("mousedown", () => {
     isPointerSelecting = true;
@@ -365,4 +521,5 @@
   display.addEventListener("keyup", updateSelectedText);
   document.addEventListener("mouseup", syncSelectionAfterPointerUp);
   document.addEventListener("touchend", syncSelectionAfterPointerUp);
+  initializeConversations();
 })();

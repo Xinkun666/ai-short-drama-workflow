@@ -1017,7 +1017,9 @@ def test_apply_patch_checks_article_hash_or_unique_selection(tmp_path):
             "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
         },
     )
-    patch_id = proposal.get_json()["result"]["patch_id"]
+    proposal_payload = proposal.get_json()
+    patch_id = proposal_payload["result"]["patch_id"]
+    conversation_id = proposal_payload["conversation"]["conversation_id"]
     client.patch(
         f"/api/script/generations/{generation['generation_id']}/article",
         json={"article": generation["script"]["article"] + "\n\n智人开局，装备一般"},
@@ -1025,7 +1027,12 @@ def test_apply_patch_checks_article_hash_or_unique_selection(tmp_path):
 
     response = client.post(
         f"/api/script/generations/{generation['generation_id']}/assist",
-        json={"message": "应用这个修改", "intent_hint": "apply_patch", "patch_id": patch_id},
+        json={
+            "conversation_id": conversation_id,
+            "message": "应用这个修改",
+            "intent_hint": "apply_patch",
+            "patch_id": patch_id,
+        },
     )
 
     assert response.status_code == 409
@@ -1055,11 +1062,18 @@ def test_reject_patch_marks_rejected(tmp_path):
             "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
         },
     )
-    patch_id = proposal.get_json()["result"]["patch_id"]
+    proposal_payload = proposal.get_json()
+    patch_id = proposal_payload["result"]["patch_id"]
+    conversation_id = proposal_payload["conversation"]["conversation_id"]
 
     response = client.post(
         f"/api/script/generations/{generation['generation_id']}/assist",
-        json={"message": "放弃这版", "intent_hint": "reject_patch", "patch_id": patch_id},
+        json={
+            "conversation_id": conversation_id,
+            "message": "放弃这版",
+            "intent_hint": "reject_patch",
+            "patch_id": patch_id,
+        },
     )
 
     assert response.status_code == 200
@@ -1135,6 +1149,349 @@ def test_rag_called_for_source_question(tmp_path, monkeypatch):
     assert payload["contexts"][0]["chunk_id"] == "demo:1"
 
 
+def test_create_conversation(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "开头修改讨论"},
+    )
+
+    assert response.status_code == 200
+    conversation = response.get_json()["conversation"]
+    assert conversation["conversation_id"]
+    assert conversation["title"] == "开头修改讨论"
+    assert conversation["created_at"]
+    assert conversation["updated_at"]
+    assert conversation["message_count"] == 0
+    assert conversation["last_message_preview"] == ""
+
+
+def test_list_conversations_ordered_by_updated_at(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    older = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "旧对话"},
+    ).get_json()["conversation"]
+    newer = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "新对话"},
+    ).get_json()["conversation"]
+
+    client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"conversation_id": older["conversation_id"], "message": "你好"},
+    )
+
+    response = client.get(f"/api/script/generations/{generation['generation_id']}/assistant/conversations")
+
+    assert response.status_code == 200
+    conversations = response.get_json()["conversations"]
+    assert conversations[0]["conversation_id"] == older["conversation_id"]
+    assert {conversation["conversation_id"] for conversation in conversations} == {
+        older["conversation_id"],
+        newer["conversation_id"],
+    }
+
+
+def test_assist_auto_creates_conversation_when_missing(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"message": "你好"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["conversation"]["conversation_id"]
+    assert payload["conversation"]["message_count"] == 2
+    assert payload["conversation"]["title"] == "你好"
+
+
+def test_assist_saves_messages_to_conversation(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    conversation = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "阅读讨论"},
+    ).get_json()["conversation"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"conversation_id": conversation["conversation_id"], "message": "你好"},
+    )
+    detail = client.get(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations/{conversation['conversation_id']}"
+    )
+
+    assert response.status_code == 200
+    assert detail.status_code == 200
+    payload = detail.get_json()
+    assert [message["role"] for message in payload["messages"]] == ["user", "assistant"]
+    assert payload["messages"][0]["content"] == "你好"
+    assert payload["messages"][0]["conversation_id"] == conversation["conversation_id"]
+    assert payload["messages"][1]["intent"] == "SMALLTALK"
+    assert payload["conversation"]["message_count"] == 2
+
+
+def test_assist_uses_current_conversation_history_only(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    first = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "第一轮"},
+    ).get_json()["conversation"]
+    second = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "第二轮"},
+    ).get_json()["conversation"]
+
+    client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": first["conversation_id"],
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+            "message": "帮我润色这段",
+        },
+    )
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": second["conversation_id"],
+            "selection": {"text": "这波不是迁徙，是人类大型开图。", "paragraph_id": "script-paragraph-2"},
+            "message": "帮我润色这段",
+        },
+    )
+
+    assert response.status_code == 200
+    conversation_payload = provider.edit_payload["conversation"]
+    assert all("智人开局" not in item["content"] for item in conversation_payload)
+    assert all(item.get("conversation_id") in {"", second["conversation_id"]} for item in conversation_payload)
+
+
+def test_delete_conversation_archives_it(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    conversation = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "待删除"},
+    ).get_json()["conversation"]
+
+    response = client.delete(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations/{conversation['conversation_id']}"
+    )
+    list_response = client.get(f"/api/script/generations/{generation['generation_id']}/assistant/conversations")
+
+    assert response.status_code == 200
+    assert list_response.status_code == 200
+    assert list_response.get_json()["conversations"] == []
+    with sqlite3.connect(tmp_path / "outputs" / "material_workstation.sqlite3") as connection:
+        archived = connection.execute(
+            "SELECT is_archived FROM script_assistant_conversations WHERE conversation_id = ?",
+            (conversation["conversation_id"],),
+        ).fetchone()[0]
+    assert archived == 1
+
+
+def test_selection_change_does_not_switch_conversation(tmp_path):
+    reader_script = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "script_reader.js").read_text(encoding="utf-8")
+
+    assert "loadSelectionHistory(selectedText)" not in reader_script
+    assert "loadConversation(" in reader_script
+    assert "currentConversationId" in reader_script
+
+
+def test_selection_history_is_manual_only(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    conversation = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "选区讨论"},
+    ).get_json()["conversation"]
+    client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": conversation["conversation_id"],
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+            "message": "帮我润色这段",
+        },
+    )
+
+    history_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/selection-history",
+        json={"selection": " 智人开局，装备一般[1] "},
+    )
+    detail = client.get(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations/{conversation['conversation_id']}"
+    )
+
+    assert history_response.status_code == 200
+    history_payload = history_response.get_json()
+    assert history_payload["match_count"] >= 2
+    assert history_payload["messages"][0]["selection"] == "智人开局，装备一般"
+    assert len(detail.get_json()["messages"]) == 2
+
+
+def test_patch_is_scoped_to_conversation(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    first = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "第一轮"},
+    ).get_json()["conversation"]
+    second = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations",
+        json={"title": "第二轮"},
+    ).get_json()["conversation"]
+    proposal = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": first["conversation_id"],
+            "selection": {"text": "智人开局，装备一般", "paragraph_id": "script-paragraph-1"},
+            "message": "帮我润色这段",
+        },
+    )
+    patch_id = proposal.get_json()["result"]["patch_id"]
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={
+            "conversation_id": second["conversation_id"],
+            "message": "应用这个修改",
+            "intent_hint": "apply_patch",
+            "patch_id": patch_id,
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.get_json()["result"]["applied"] is False
+    updated = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3").find_script_generation(
+        generation["generation_id"]
+    )
+    assert "火和烹饪让食物更容易消化" not in updated["script"]["article"]
+
+
+def test_legacy_messages_have_fallback_conversation(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    database_path = tmp_path / "outputs" / "material_workstation.sqlite3"
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO script_assistant_messages (
+                generation_id, role, content, selection_text, result_json, contexts_json, conversation_id
+            ) VALUES (?, 'user', '旧消息', '智人开局，装备一般', '{}', '[]', '')
+            """,
+            (generation["generation_id"],),
+        )
+
+    response = client.get(f"/api/script/generations/{generation['generation_id']}/assistant/conversations")
+    conversation = response.get_json()["conversations"][0]
+    detail = client.get(
+        f"/api/script/generations/{generation['generation_id']}/assistant/conversations/{conversation['conversation_id']}"
+    )
+
+    assert response.status_code == 200
+    assert conversation["title"] == "旧对话"
+    assert conversation["message_count"] == 1
+    assert detail.get_json()["messages"][0]["content"] == "旧消息"
+
+
 def test_script_assistant_keeps_conversation_context_between_turns(tmp_path):
     library = tmp_path / "资料库"
     library.mkdir()
@@ -1155,9 +1512,10 @@ def test_script_assistant_keeps_conversation_context_between_turns(tmp_path):
         f"/api/script/generations/{generation['generation_id']}/assist",
         json={"selection": "智人开局，装备一般", "instruction": "加几个疑问句开头"},
     )
+    conversation_id = first_response.get_json()["conversation"]["conversation_id"]
     followup_response = client.post(
         f"/api/script/generations/{generation['generation_id']}/assist",
-        json={"selection": "", "instruction": "不，疑问应该放在开头，然后再进入原文"},
+        json={"conversation_id": conversation_id, "selection": "", "instruction": "不，疑问应该放在开头，然后再进入原文"},
     )
 
     assert first_response.status_code == 200
@@ -1188,10 +1546,17 @@ def test_script_assistant_applies_pending_edit_only_with_patch_id(tmp_path):
         f"/api/script/generations/{generation['generation_id']}/assist",
         json={"selection": "智人开局，装备一般", "instruction": "为我修改这里，加上疑问句开头"},
     )
-    patch_id = assist_response.get_json()["result"]["patch_id"]
+    assist_payload = assist_response.get_json()
+    patch_id = assist_payload["result"]["patch_id"]
+    conversation_id = assist_payload["conversation"]["conversation_id"]
     apply_response = client.post(
         f"/api/script/generations/{generation['generation_id']}/assist",
-        json={"message": "应用这个修改", "intent_hint": "apply_patch", "patch_id": patch_id},
+        json={
+            "conversation_id": conversation_id,
+            "message": "应用这个修改",
+            "intent_hint": "apply_patch",
+            "patch_id": patch_id,
+        },
     )
 
     assert assist_response.status_code == 200
@@ -1307,15 +1672,26 @@ def test_script_reader_uses_chinese_article_typography():
     assert "formatSelectedQuote" not in reader_script
     assert "stripSelectedQuoteFromInstruction" not in reader_script
     assert "loadSelectionHistory" in reader_script
-    assert "/assist/history" in reader_script
+    assert "/assistant/selection-history" in reader_script
+    assert "/assist/history" not in reader_script
     assert "ragComposer.value = selectedText" not in reader_script
+    assert "data-conversation-title" in template
+    assert "data-conversation-new" in template
+    assert "data-conversation-toggle" in template
+    assert "data-conversation-list" in template
     assert "data-selection-card" in template
     assert "data-selection-summary" in template
     assert "data-selection-explain" in template
     assert "data-selection-review" in template
     assert "data-selection-edit" in template
+    assert "data-selection-history" in template
     assert "data-selection-clear" in template
+    assert ".script-conversation-bar" in styles
+    assert ".script-conversation-list" in styles
     assert ".script-selection-card" in styles
+    assert "initializeConversations" in reader_script
+    assert "currentConversationId" in reader_script
+    assert "conversation_id" in reader_script
     assert "sendAssistantMessage" in reader_script
     assert "intent_hint" in reader_script
     assert "applyPatch" in reader_script
