@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ generation.topic }} - {{ section_title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260623i">
+  </head>
+  <body>
+    <main class="script-page-shell">
+      <header class="script-page-hero">
+        <div>
+          <a class="back-link" href="/#script">返回剧本生成</a>
+          <div class="eyebrow">AI短剧工作站</div>
+          <h1>{{ section_title }}</h1>
+          <p>{{ generation.topic }}</p>
+        </div>
+        <div class="script-page-meta">
+          <span>{{ generation.time_range }}</span>
+          <span>{{ generation.created_at }}</span>
+        </div>
+      </header>
+
+      <nav class="script-page-tabs" aria-label="剧本生成查看器">
+        <a class="{% if section == 'script' %}active{% endif %}" href="/script-generations/{{ generation.generation_id }}/script">剧本</a>
+        <a class="{% if section == 'subjects' %}active{% endif %}" href="/script-generations/{{ generation.generation_id }}/subjects">主体</a>
+        <a class="{% if section == 'maps' %}active{% endif %}" href="/script-generations/{{ generation.generation_id }}/maps">地点</a>
+      </nav>
+
+      {% if section == "script" %}
+        <article class="script-reader-page" data-script-reader="{{ generation.generation_id }}">
+          <h2>{{ generation.script.title or generation.topic }}</h2>
+          {% if generation.script.logline %}
+            <p class="script-logline">{{ generation.script.logline }}</p>
+          {% endif %}
+
+          {% set fact_cards = generation.script.fact_cards or [] %}
+
+          <div class="script-reader-workspace">
+            <section class="script-reader-main">
+              <div class="script-editor-toolbar">
+                <h3>完整剧本</h3>
+                <div>
+                  <button class="text-button" type="button" data-edit-start>编辑</button>
+                  <button class="text-button" type="button" data-edit-save hidden>保存</button>
+                  <button class="text-button" type="button" data-edit-cancel hidden>取消</button>
+                </div>
+              </div>
+              <section class="script-article-card" data-script-display>
+                {% if generation.script.article %}
+                  {% for paragraph in generation.script.article.split("\n\n") %}
+                    {% if paragraph.strip() %}
+                      <p id="script-paragraph-{{ loop.index }}">{{ paragraph }}{% if loop.index0 < fact_cards|length %}<sup class="script-citation-wrap"><a class="script-citation" href="#source-{{ loop.index }}" aria-label="跳转到出处 {{ loop.index }}">[{{ loop.index }}]</a></sup>{% endif %}</p>
+                    {% endif %}
+                  {% endfor %}
+                {% else %}
+                  <p class="muted-text">暂无完整剧本文本。</p>
+                {% endif %}
+              </section>
+              <textarea class="script-editor-textarea" data-script-editor hidden>{{ generation.script.article or "" }}</textarea>
+              <div class="script-editor-status" data-edit-status></div>
+              {% if generation.script.causal_chain %}
+                <section class="script-structure-card">
+                  <h3>推导链条</h3>
+                  <ol class="causal-chain-list">
+                    {% for item in generation.script.causal_chain %}
+                      <li>{{ item }}</li>
+                    {% endfor %}
+                  </ol>
+                </section>
+              {% endif %}
+
+              {% if fact_cards %}
+                <section class="script-structure-card">
+                  <h3>史实出处</h3>
+                  <div class="fact-card-grid">
+                    {% for card in fact_cards %}
+                      <article class="fact-card" id="source-{{ loop.index }}">
+                        <div>
+                          <strong>[{{ loop.index }}] {{ card.fact }}</strong>
+                          <span>{{ card.confidence }}</span>
+                        </div>
+                        <p>{{ card.time }} · {{ card.place }}</p>
+                        {% if card.source_basis %}
+                          <em>依据：{{ card.source_basis }}</em>
+                        {% endif %}
+                        {% if card.do_not_overstate %}
+                          <small>边界：{{ card.do_not_overstate }}</small>
+                        {% endif %}
+                        <a class="source-back-link" href="#script-paragraph-{{ loop.index }}">返回正文</a>
+                      </article>
+                    {% endfor %}
+                  </div>
+                </section>
+              {% endif %}
+            </section>
+
+            <aside class="script-rag-panel" aria-label="剧本对话助手">
+              <div class="script-rag-head">
+                <div>
+                  <h3>剧本对话助手</h3>
+                  <p>阅读、评审和局部修改当前剧本；确认后才会保存改动。</p>
+                </div>
+              </div>
+              <div class="script-rag-chat" data-rag-chat>
+                <div class="script-rag-message assistant">
+                  <p>你好，我可以陪你阅读、评审和修改这版剧本。你可以直接聊天，也可以选中一段让我审查或改写。</p>
+                </div>
+              </div>
+              <div class="script-rag-status" data-rag-status></div>
+              <div class="script-rag-composer">
+                <textarea data-rag-composer placeholder="直接输入问题；选中正文后会带引号填入，可继续写修改想法"></textarea>
+                <button class="command-button primary" type="button" data-rag-ask>发送</button>
+              </div>
+            </aside>
+          </div>
+        </article>
+      {% elif section == "subjects" %}
+        <section class="script-subject-page">
+          {% if generation.subjects %}
+            {% for subject in generation.subjects %}
+              <article class="subject-row">
+                <div>
+                  <span>{{ subject.type }}</span>
+                  <strong>{{ subject.name }}</strong>
+                </div>
+                <p>{{ subject.intro }}</p>
+                <p>{{ subject.visual_modeling }}</p>
+                <p>{{ subject.script_usage }}</p>
+              </article>
+            {% endfor %}
+          {% else %}
+            <div class="empty-record">主体尚未生成，可在需要时单独生成。</div>
+          {% endif %}
+        </section>
+      {% else %}
+        <section class="script-map-page">
+          {% if generation.map_shots %}
+            {% for shot in generation.map_shots %}
+              <article class="map-shot-card">
+                {% if shot.map_render_url %}
+                  <img class="map-shot-image" src="{{ shot.map_render_url }}" alt="{{ shot.title }}" loading="lazy">
+                {% else %}
+                  <div class="map-shot-preview">{{ shot.region }}</div>
+                {% endif %}
+                <div>
+                  <h3>{{ shot.title }}</h3>
+                  <p>{{ shot.description }}</p>
+                  <div class="map-shot-places">
+                    {% for place in shot.places %}
+                      <span>{{ place }}</span>
+                    {% endfor %}
+                  </div>
+                </div>
+              </article>
+            {% endfor %}
+          {% else %}
+            <div class="empty-record">地点画面尚未生成，可在需要时单独生成。</div>
+          {% endif %}
+        </section>
+      {% endif %}
+    </main>
+    {% if section == "script" %}
+      <script src="{{ url_for('static', filename='script_reader.js') }}?v=20260623i"></script>
+    {% endif %}
+  </body>
+</html>

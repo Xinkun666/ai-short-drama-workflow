@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI短剧工作站</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260622b">
+  </head>
+  <body>
+    <main class="prepare-shell">
+      <nav class="station-nav" aria-label="工作站导航">
+        <button class="nav-tab active" type="button" data-view-tab="materials">材料准备</button>
+        <button class="nav-tab" type="button" data-view-tab="script">剧本生成</button>
+      </nav>
+
+      <section class="workspace-panel active" id="materialsView" data-view-panel="materials">
+        <header class="station-header">
+          <div>
+            <div class="eyebrow">AI短剧工作站</div>
+            <h1>材料准备</h1>
+          </div>
+          <div class="stage-tag">第一步：材料解析</div>
+        </header>
+
+        <section class="command-area" aria-label="材料准备主控台">
+          <div class="command-row">
+            <label class="command-box" id="commandBox" for="commandInput">
+              <span class="command-dot" aria-hidden="true"></span>
+              <input
+                id="commandInput"
+                type="search"
+                placeholder="搜索书名、查看解析状态"
+                autocomplete="off"
+              >
+            </label>
+            <input id="fileInput" type="file" accept=".pdf,.epub,.txt,.md,.markdown,.mobi,.doc,.docx,application/pdf,text/plain,text/markdown,application/epub+zip" hidden>
+            <button class="command-button secondary" id="uploadButton" type="button">上传</button>
+            <button class="command-button primary" id="parseButton" type="button" disabled>解析</button>
+          </div>
+
+          <div class="source-hint" id="sourceHint">上传或选择一本材料后开始解析。</div>
+
+          <section class="records-panel" aria-label="解析记录">
+            <div class="records-header">
+              <span>解析记录</span>
+              <button class="text-button" id="refreshButton" type="button">刷新</button>
+            </div>
+            <div class="records-list" id="recordsList"></div>
+          </section>
+        </section>
+      </section>
+
+      <section class="workspace-panel" id="scriptView" data-view-panel="script" hidden>
+        <header class="station-header">
+          <div>
+            <div class="eyebrow">AI短剧工作站</div>
+            <h1>剧本生成</h1>
+          </div>
+          <div class="stage-tag">第二步：剧本 Agent</div>
+        </header>
+
+        <section class="script-console" aria-label="剧本生成主控台">
+          <div class="script-form-grid">
+            <label class="script-field" for="scriptTopicInput">
+              <span>主题</span>
+              <input id="scriptTopicInput" type="text" placeholder="输入短剧主题" autocomplete="off">
+            </label>
+            <div class="script-year-range" aria-label="时间范围">
+              <label class="script-field" for="scriptStartYearInput">
+                <span>开始年份</span>
+                <input id="scriptStartYearInput" type="text" inputmode="numeric" pattern="-?[0-9]*" placeholder="-300000" autocomplete="off">
+              </label>
+              <label class="script-field" for="scriptEndYearInput">
+                <span>结束年份</span>
+                <input id="scriptEndYearInput" type="text" inputmode="numeric" pattern="-?[0-9]*" placeholder="-70000" autocomplete="off">
+              </label>
+            </div>
+            <div class="timeline-picker" id="timelinePicker">
+              <button class="timeline-toggle" id="timelineToggle" type="button" aria-expanded="false">
+                <span>勾选时间线</span>
+                <strong id="selectedTimelineCount">0</strong>
+              </button>
+              <div class="timeline-popover" id="timelinePopover" hidden>
+                <div class="timeline-popover-head">
+                  <span>选择书籍时间线</span>
+                  <button class="text-button" id="closeTimelinePicker" type="button">完成</button>
+                </div>
+                <div class="timeline-source-list" id="timelineSourceList"></div>
+              </div>
+            </div>
+            <button class="command-button primary script-submit" id="scriptGenerateButton" type="button">生成剧本</button>
+          </div>
+          <div class="script-hint" id="scriptHint">负数表示公元前/远古年份，例如 -300000 表示 30万年前。请选择要引用的书籍时间线。</div>
+        </section>
+
+        <section class="script-records-panel" aria-label="剧本生成记录">
+          <div class="records-header">
+            <span>剧本记录</span>
+            <button class="text-button" id="refreshScriptRecordsButton" type="button">刷新</button>
+          </div>
+          <div class="script-records-list" id="scriptRecordsList"></div>
+        </section>
+
+        <section class="script-result-panel" id="scriptResultPanel" aria-label="剧本生成结果" hidden>
+          <div class="script-result-head">
+            <div>
+              <div class="eyebrow">生成结果</div>
+              <h2 id="scriptResultTitle">短剧剧本</h2>
+            </div>
+            <div class="script-viewer-tabs" aria-label="剧本结果查看器">
+              <button class="script-viewer-tab active" type="button" data-script-viewer="script">剧本阅读器</button>
+              <button class="script-viewer-tab" type="button" data-script-viewer="subjects">主体查看</button>
+              <button class="script-viewer-tab" type="button" data-script-viewer="maps">地点画面</button>
+            </div>
+          </div>
+          <div class="script-result-grid script-viewer-body">
+            <section class="script-result-block script-main-block script-viewer-section active" data-script-viewer-panel="script">
+              <h3>短剧剧本</h3>
+              <div id="scriptScenes"></div>
+              <div class="script-review-block">
+                <h3>剧本审查</h3>
+                <div id="scriptReview"></div>
+              </div>
+              <div class="script-source-block">
+                <h3>匹配到的时间线材料</h3>
+                <div id="scriptMatchedEvents"></div>
+              </div>
+            </section>
+            <section class="script-result-block script-viewer-section" data-script-viewer-panel="subjects" hidden>
+              <h3>主体建模清单</h3>
+              <div id="scriptSubjects"></div>
+            </section>
+            <section class="script-result-block script-viewer-section" data-script-viewer-panel="maps" hidden>
+              <h3>地图画面</h3>
+              <div id="scriptMapShots"></div>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}?v=20260622a"></script>
+  </body>
+</html>

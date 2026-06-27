@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ record.book_name }} - 全书时间线</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260620a">
+  </head>
+  <body>
+    <main class="timeline-shell">
+      <section class="timeline-hero">
+        <a class="back-link" href="/materials/{{ record.record_id }}">返回章节详情</a>
+        <div class="eyebrow">全书时间线</div>
+        <h1>{{ record.book_name }}</h1>
+        <div class="timeline-stats">
+          <div><strong>{{ timeline.event_count }}</strong><span>事件模块</span></div>
+          <div><strong>{{ timeline.place_count }}</strong><span>地点</span></div>
+          <div><strong>{{ timeline.time_span.label }}</strong><span>时间跨度</span></div>
+        </div>
+      </section>
+
+      <section class="timeline-layout">
+        <aside class="timeline-filter">
+          <h2>筛选线索</h2>
+          <p>第一版先按时间排序，后续可以在这里加入章节、地区、重要性和可信度筛选。</p>
+          <div class="filter-pill">按时间升序</div>
+          <div class="filter-pill">显示证据说明</div>
+          <div class="filter-pill">保留章节回跳</div>
+        </aside>
+
+        <section class="timeline-list">
+          {% for event in events %}
+            <article class="timeline-event">
+              <div class="timeline-event-top">
+                <span>{{ event.event_id }}</span>
+                <span>重要性 {{ event.importance }}/5</span>
+                <span class="confidence confidence-{{ event.confidence }}">{{ event.confidence }}</span>
+              </div>
+              <h2>{{ event.title }}</h2>
+              <div class="timeline-event-grid">
+                <div>
+                  <strong>时间</strong>
+                  <p>{{ event.time_label }}</p>
+                </div>
+                <div>
+                  <strong>地点</strong>
+                  <p>{{ event.place_label }}</p>
+                </div>
+              </div>
+              {% if event.movement %}
+                <div class="movement-line">移动：{{ event.movement["from"] }} → {{ event.movement["to"] }}</div>
+              {% endif %}
+              <p class="timeline-content">{{ event.content }}</p>
+              <div class="timeline-evidence">
+                <strong>证据说明</strong>
+                <p>{{ event.evidence_note }}</p>
+              </div>
+              {% if event.drama_potential %}
+                <div class="timeline-drama">
+                  <strong>短剧价值</strong>
+                  <p>{{ event.drama_potential }}</p>
+                </div>
+              {% endif %}
+              <div class="timeline-links">
+                <span>页码 {{ event.source_pages | join(" / ") }}</span>
+                {% if chapter_urls.get(event.chapter_id) %}
+                  <a href="{{ chapter_urls.get(event.chapter_id) }}">回到 {{ event.chapter_id }} 阅读器</a>
+                {% endif %}
+              </div>
+            </article>
+          {% endfor %}
+        </section>
+      </section>
+    </main>
+  </body>
+</html>

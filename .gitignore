@@ -1,0 +1,29 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local uploads and generated workbench outputs
+uploads/
+drama-agent-system/outputs/
+
+# Local databases and runtime artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.pid
+*.log
+
+# Large/source material files should stay local unless deliberately cleared for release.
+资料库/**/*.pdf
+资料库/**/*.epub
+资料库/**/*.mobi
+资料库/**/*.doc
+资料库/**/*.docx
+*.pdf
+*.epub
+*.mobi
+
+# Local environment files
+.env
+.env.*

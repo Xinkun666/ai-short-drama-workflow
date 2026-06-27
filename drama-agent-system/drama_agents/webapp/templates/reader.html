@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ reader.title }} - 章节阅读器</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260619e">
+  </head>
+  <body>
+    <main class="reader-shell">
+      <aside class="reader-toc">
+        <a class="back-link" href="/materials/{{ record.record_id }}">返回章节详情</a>
+        <h2>章节目录</h2>
+        <nav>
+          {% for item in chapters %}
+            <a class="{% if item.chapter_id == chapter.chapter_id %}active{% endif %}" href="{{ item.reader_url }}">
+              <span>{{ item.chapter_id }}</span>
+              {{ item.title }}
+            </a>
+          {% endfor %}
+        </nav>
+      </aside>
+
+      <article class="reader-main">
+        <header class="reader-head">
+          <div class="eyebrow">章节阅读器</div>
+          <h1>{{ reader.title }}</h1>
+          <p>{{ reader.subtitle }}</p>
+          <div class="reader-meta">
+            <span>页码 {{ chapter.start_page }}-{{ chapter.end_page }}</span>
+            <span>{{ chapter.word_count }} 字</span>
+            <span>{{ reader.status }}</span>
+          </div>
+        </header>
+
+        <section class="reader-summary-card">
+          <h2>本章摘要</h2>
+          <p>{{ reader.summary }}</p>
+        </section>
+
+        {% for section in reader.sections %}
+          <section class="reader-section">
+            <h2>{{ section.heading }}</h2>
+            <p>{{ section.body }}</p>
+            <div class="page-ref">页码：{{ section.page_refs | join(" / ") }}</div>
+          </section>
+        {% endfor %}
+      </article>
+
+      <aside class="reader-side">
+        <section>
+          <h2>图表提示</h2>
+          {% if reader.visual_assets %}
+            <ul class="asset-list">
+              {% for asset in reader.visual_assets %}
+                <li>
+                  <strong>{{ asset.title }}</strong>
+                  <span>{{ asset.type }}</span>
+                  <p>{{ asset.description }}</p>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p class="muted-text">暂无图表提示。</p>
+          {% endif %}
+        </section>
+        <section>
+          <h2>关键概念</h2>
+          <div class="tag-list">
+            {% for concept in reader.key_concepts %}
+              <span>{{ concept }}</span>
+            {% endfor %}
+          </div>
+        </section>
+        <section>
+          <h2>短剧标签</h2>
+          <div class="tag-list">
+            {% for tag in reader.drama_tags %}
+              <span>{{ tag }}</span>
+            {% endfor %}
+          </div>
+        </section>
+        <section>
+          <h2>原始文件</h2>
+          {% if chapter.pdf_link %}
+            <a class="side-link" href="{{ chapter.pdf_link }}" target="_blank">原始 PDF</a>
+          {% endif %}
+          <a class="side-link" href="{{ chapter.text_link }}" target="_blank">章节 Markdown</a>
+        </section>
+      </aside>
+    </main>
+  </body>
+</html>

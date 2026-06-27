@@ -1,0 +1,995 @@
+from pathlib import Path
+from io import BytesIO
+import sqlite3
+
+from pypdf import PdfWriter
+
+from drama_agents.storage import MaterialDatabase
+from drama_agents.vector_store import LocalVectorStore
+from drama_agents.webapp.app import create_app
+
+
+def create_pdf(path: Path) -> None:
+    writer = PdfWriter()
+    for _ in range(4):
+        writer.add_blank_page(width=300, height=400)
+    writer.add_outline_item("1 First chapter", 0)
+    writer.add_outline_item("2 Second chapter", 2)
+    with path.open("wb") as handle:
+        writer.write(handle)
+
+
+class FakeDeepSeekProvider:
+    def refine(self, *, book_title, chapter, raw_text):
+        return {
+            "title": f"精读：{chapter.title}",
+            "subtitle": "阅读器内容",
+            "summary": "章节摘要内容。",
+            "sections": [
+                {
+                    "heading": "自然小节",
+                    "body": "这里是 DeepSeek 整理后的自然正文。",
+                    "page_refs": [chapter.start_page],
+                }
+            ],
+            "visual_assets": [
+                {"type": "map", "title": "地图提示", "description": "这里保留地图或图表提示。"}
+            ],
+            "key_concepts": ["文明", "迁徙"],
+            "drama_tags": ["文明跃迁"],
+        }
+
+
+class FakeTimelineProvider:
+    def __init__(self):
+        self.calls = 0
+
+    def extract_timeline(self, *, book_title, chapter, raw_text, reader_payload):
+        self.calls += 1
+        return {
+            "events": [
+                {
+                    "time_label": "约公元前 200000 年至公元前 50000 年",
+                    "time_start_year": -200000,
+                    "time_end_year": -50000,
+                    "time_precision": "range",
+                    "place_label": "非洲及早期智人扩散区域",
+                    "place_scope": "region",
+                    "places": ["非洲"],
+                    "movement": None,
+                    "title": f"{chapter['chapter_id']} 智人文化能力逐步形成",
+                    "content": "本事件模块说明智人出现后，文化能力、想象力和环境适应方式如何逐步形成。",
+                    "source_pages": [chapter["start_page"], chapter["end_page"]],
+                    "importance": 4,
+                    "confidence": "medium",
+                    "evidence_note": "原文给出章节时间范围，地点依据章节主题概括为非洲及早期扩散区域。",
+                    "drama_potential": "可作为文明能力觉醒的前史节点。",
+                }
+            ]
+        }
+
+
+class FakeScriptProvider:
+    def __init__(self):
+        self.edit_payload = None
+
+    def generate_script(self, payload):
+        return {
+            "title": f"{payload['topic']} - 短剧稿",
+            "logline": "用轻松好懂的方式讲清楚这个历史节点。",
+            "fact_cards": [
+                {
+                    "id": "F1",
+                    "fact": "智人相关事件",
+                    "time": payload["time_range"],
+                    "place": "非洲",
+                    "source_basis": "测试材料",
+                    "confidence": "高",
+                    "drama_direction": "地图开场",
+                    "do_not_overstate": "不要写死",
+                }
+            ],
+            "causal_chain": ["智人开局 → 故事系统上线"],
+            "outline": [
+                {
+                    "title": "地图开场",
+                    "core_point": "智人开局",
+                    "opening_image": "地图背景",
+                    "human_action": "迁徙",
+                    "conflict": "环境压力",
+                    "change": "协作",
+                    "cost": "风险",
+                    "transition": "进入下一段",
+                }
+            ],
+            "article": "智人开局，装备一般，但故事系统已经上线。\n\n这波不是迁徙，是人类大型开图。",
+            "fact_boundaries": {
+                "explicitly_supported": ["测试材料明确支持"],
+                "dramatized_inference": [],
+                "needs_manual_check": [],
+                "possible_overstatement": [],
+                "suggested_sources": [],
+            },
+            "subjects": [
+                {
+                    "name": "智人",
+                    "type": "人群",
+                    "intro": "本集核心人群。",
+                    "visual_modeling": "卡通人物群像。",
+                    "script_usage": "承担主角视角。",
+                }
+            ],
+            "map_shots": [
+                {
+                    "title": "非洲迁徙前景",
+                    "region": "africa",
+                    "places": ["非洲"],
+                    "route": None,
+                    "description": "展示故事发生区域。",
+                    "script_scene": 1,
+                }
+            ],
+        }
+
+    def review_script(self, source_payload, draft):
+        return {
+            "passed": True,
+            "score": 5,
+            "verdict": "通过。",
+            "theme_alignment": "贴合。",
+            "story_completeness": "完整。",
+            "continuity": "连贯。",
+            "material_usage": "充分。",
+            "key_node_depth": "充分。",
+            "simplicity_risk": "不简陋。",
+            "missing_content": [],
+            "issues": [],
+            "revision_brief": "",
+        }
+
+    def revise_script(self, source_payload, draft, review):
+        return self.generate_script(source_payload)
+
+    def edit_selection(self, payload):
+        self.edit_payload = payload
+        return {
+            "answer": "你好，我可以阅读、评审和局部修改当前剧本。" if not payload.get("selection") else "这段可以补充火与烹饪如何释放能量。",
+            "replacement": "" if not payload.get("selection") else "火和烹饪让食物更容易消化，也减少了咀嚼时间，于是更多能量可以供给大脑。",
+            "used_context_ids": [payload["contexts"][0]["chunk_id"]] if payload.get("contexts") else [],
+        }
+
+
+def test_homepage_renders_material_prep_workspace(tmp_path):
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "AI短剧工作站" in html
+    assert "材料准备" in html
+    assert "上传" in html
+    assert "解析" in html
+    assert "搜索书名、查看解析状态" in html
+
+
+def test_homepage_renders_script_generation_workspace(tmp_path):
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "材料准备" in html
+    assert "剧本生成" in html
+    assert "输入短剧主题" in html
+    assert "时间范围" in html
+    assert "勾选时间线" in html
+
+
+def test_sources_api_lists_workspace_pdfs(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.get("/api/sources")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["sources"][0]["name"] == "demo.pdf"
+    assert payload["sources"][0]["relative_path"] == "资料库/demo.pdf"
+
+
+def test_sources_api_lists_supported_text_and_ebook_materials(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    (library / "demo.md").write_text("# 第一章\n正文", encoding="utf-8")
+    (library / "notes.txt").write_text("纯文本正文", encoding="utf-8")
+    (library / "book.epub").write_bytes(b"placeholder")
+    (library / "book.mobi").write_bytes(b"placeholder")
+    (library / "book.docx").write_bytes(b"placeholder")
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.get("/api/sources")
+
+    assert response.status_code == 200
+    names = {source["name"] for source in response.get_json()["sources"]}
+    assert {"demo.md", "notes.txt", "book.epub", "book.mobi", "book.docx"}.issubset(names)
+
+
+def test_upload_api_accepts_markdown_material(tmp_path):
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.post(
+        "/api/upload",
+        data={"file": (BytesIO("# 第一章\n正文".encode("utf-8")), "demo.md")},
+        content_type="multipart/form-data",
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["source"]["name"] == "demo.md"
+    assert (tmp_path / "uploads" / "demo.md").exists()
+
+
+def test_split_api_processes_selected_pdf(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.post("/api/split", json={"relative_path": "资料库/demo.pdf"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["book_id"] == "demo"
+    assert len(payload["chapters"]) == 2
+    assert (tmp_path / "outputs" / "material_splits" / "demo" / "manifest.json").exists()
+
+
+def test_split_api_processes_selected_markdown(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    md_path = library / "demo.md"
+    md_path.write_text("# 第一章 文明开始\n这里是正文。", encoding="utf-8")
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.post("/api/split", json={"relative_path": "资料库/demo.md"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["book_id"] == "demo"
+    assert payload["chapters"][0]["source_format"] == "md"
+    assert payload["chapters"][0]["pdf_link"] == ""
+
+
+def test_parse_api_creates_record_with_book_metrics(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    record = payload["record"]
+    assert record["book_name"] == "demo.pdf"
+    assert record["chapter_count"] == 2
+    assert record["refinement_status"] == "completed"
+    assert record["refined_chapter_count"] == 2
+    assert record["total_words"] >= 0
+    assert record["detail_url"] == "/materials/demo"
+    assert record["parsed_at"]
+
+    records_response = client.get("/api/records")
+    records_payload = records_response.get_json()
+    assert records_payload["records"][0]["record_id"] == "demo"
+
+
+def test_parse_api_persists_record_and_chapters_to_sqlite(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+
+    assert response.status_code == 200
+    db_path = tmp_path / "outputs" / "material_workstation.sqlite3"
+    assert db_path.exists()
+    database = MaterialDatabase(db_path)
+    assert database.find_record("demo")["book_name"] == "demo.pdf"
+    assert [chapter["chapter_id"] for chapter in database.list_chapters("demo")] == ["ch01", "ch02"]
+
+
+def test_delete_parse_record_removes_record_from_list(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+
+    response = client.delete("/api/records/demo")
+
+    assert response.status_code == 200
+    assert client.get("/api/records").get_json()["records"] == []
+
+
+def test_update_record_book_name_persists_to_database_and_snapshot(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+
+    response = client.patch("/api/records/demo", json={"book_name": "我的世界史材料"})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["record"]["book_name"] == "我的世界史材料"
+    assert MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3").find_record("demo")[
+        "book_name"
+    ] == "我的世界史材料"
+    assert client.get("/api/records").get_json()["records"][0]["book_name"] == "我的世界史材料"
+
+
+def test_material_detail_page_renders_parse_result(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+
+    response = client.get("/materials/demo")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "demo.pdf" in html
+    assert "章节详情" in html
+    assert "/materials/demo/chapters/ch01" in html
+
+
+def test_chapter_reader_page_renders_refined_content(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+
+    response = client.get("/materials/demo/chapters/ch01")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "精读：1 First chapter" in html
+    assert "这里是 DeepSeek 整理后的自然正文" in html
+    assert "地图提示" in html
+    assert "原始 PDF" in html
+
+
+def test_timeline_api_creates_timeline_record_and_artifacts(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+
+    response = client.post("/api/materials/demo/timeline")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    record = payload["record"]
+    assert record["timeline_status"] == "completed"
+    assert record["timeline_event_count"] == 2
+    assert record["timeline_url"] == "/materials/demo/timeline"
+    assert (tmp_path / "outputs" / "material_splits" / "demo" / "timeline" / "timeline.json").exists()
+
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    events = database.list_timeline_events("demo")
+    assert len(events) == 2
+    assert events[0]["title"] == "ch01 智人文化能力逐步形成"
+
+
+def test_script_timeline_sources_api_lists_completed_timelines(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+
+    response = client.get("/api/script/timeline-sources")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["timeline_sources"] == [
+        {
+            "record_id": "demo",
+            "book_name": "demo.pdf",
+            "timeline_event_count": 2,
+            "timeline_url": "/materials/demo/timeline",
+        }
+    ]
+
+
+def test_script_generate_api_returns_script_only_with_deferred_subjects_and_map_shots(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+
+    response = client.post(
+        "/api/script/generate",
+        json={
+            "topic": "智人为什么从非洲走向世界",
+            "time_range": "约 20 万年前 — 5 万年前",
+            "timeline_record_ids": ["demo"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["result"]["status"] == "completed"
+    assert payload["result"]["matched_event_count"] == 2
+    assert payload["result"]["script"]["title"] == "智人为什么从非洲走向世界 - 短剧稿"
+    assert payload["result"]["subjects"] == []
+    assert payload["result"]["map_shots"] == []
+
+
+def test_script_generate_api_accepts_numeric_year_inputs(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+
+    response = client.post(
+        "/api/script/generate",
+        json={
+            "topic": "智人为什么从非洲走向世界",
+            "time_start_year": -200000,
+            "time_end_year": -50000,
+            "timeline_record_ids": ["demo"],
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.get_json()["result"]
+    assert result["time_range"] == "20万年前 — 5万年前"
+    assert result["time_start_year"] == -200000
+    assert result["time_end_year"] == -50000
+    assert result["matched_event_count"] == 2
+
+
+def test_script_generations_api_lists_and_deletes_generated_scripts(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+    generated = client.post(
+        "/api/script/generate",
+        json={
+            "topic": "智人为什么从非洲走向世界",
+            "time_range": "约 20 万年前 — 5 万年前",
+            "timeline_record_ids": ["demo"],
+        },
+    ).get_json()["result"]
+
+    response = client.get("/api/script/generations")
+
+    assert response.status_code == 200
+    records = response.get_json()["generations"]
+    assert records[0]["generation_id"] == generated["generation_id"]
+    assert records[0]["topic"] == "智人为什么从非洲走向世界"
+    assert records[0]["script_title"] == "智人为什么从非洲走向世界 - 短剧稿"
+    assert records[0]["time_range"] == "约 20 万年前 — 5 万年前"
+    assert records[0]["subject_count"] == 0
+    assert records[0]["map_shot_count"] == 0
+    assert records[0]["places"] == []
+
+    delete_response = client.delete(f"/api/script/generations/{generated['generation_id']}")
+
+    assert delete_response.status_code == 200
+    assert delete_response.get_json()["generations"] == []
+
+
+def test_script_generation_dedicated_view_pages_render_saved_sections(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+    generation = client.post(
+        "/api/script/generate",
+        json={
+            "topic": "智人为什么从非洲走向世界",
+            "time_start_year": -200000,
+            "time_end_year": -50000,
+            "timeline_record_ids": ["demo"],
+        },
+    ).get_json()["result"]
+    generation_id = generation["generation_id"]
+
+    script_response = client.get(f"/script-generations/{generation_id}/script")
+    subjects_response = client.get(f"/script-generations/{generation_id}/subjects")
+    maps_response = client.get(f"/script-generations/{generation_id}/maps")
+
+    assert script_response.status_code == 200
+    script_html = script_response.get_data(as_text=True)
+    assert "剧本阅读器" in script_html
+    assert 'data-script-reader="' in script_html
+    assert "编辑" in script_html
+    assert "保存" in script_html
+    assert "剧本对话助手" in script_html
+    assert "RAG 助手" not in script_html
+    assert "构建向量库" not in script_html
+    assert 'data-rag-chat' in script_html
+    assert 'data-rag-composer' in script_html
+    assert 'data-script-editor hidden' in script_html
+    assert "script_reader.js" in script_html
+    assert "已选内容" not in script_html
+    assert "你的要求" not in script_html
+    assert "Agent 建议" not in script_html
+    assert "智人开局，装备一般" in script_html
+    assert "推导链条" in script_html
+    assert "史实出处" in script_html
+    assert script_html.index("完整剧本") < script_html.index("推导链条") < script_html.index("史实出处")
+    assert '<sup class="script-citation-wrap"><a class="script-citation" href="#source-1"' in script_html
+    assert 'id="script-paragraph-1"' in script_html
+    assert 'id="source-1"' in script_html
+    assert 'href="#script-paragraph-1"' in script_html
+    assert "返回正文" in script_html
+
+    assert subjects_response.status_code == 200
+    subjects_html = subjects_response.get_data(as_text=True)
+    assert "主体查看" in subjects_html
+    assert "主体尚未生成，可在需要时单独生成" in subjects_html
+
+    assert maps_response.status_code == 200
+    maps_html = maps_response.get_data(as_text=True)
+    assert "地点画面" in maps_html
+    assert "地点画面尚未生成，可在需要时单独生成" in maps_html
+
+
+def create_generated_script(client):
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+    return client.post(
+        "/api/script/generate",
+        json={
+            "topic": "智人为什么从非洲走向世界",
+            "time_start_year": -200000,
+            "time_end_year": -50000,
+            "timeline_record_ids": ["demo"],
+        },
+    ).get_json()["result"]
+
+
+def test_script_article_can_be_edited_and_saved(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.patch(
+        f"/api/script/generations/{generation['generation_id']}/article",
+        json={"article": "第一段修改后。\n\n第二段也修改。"},
+    )
+
+    assert response.status_code == 200
+    updated = response.get_json()["generation"]
+    assert updated["script"]["article"] == "第一段修改后。\n\n第二段也修改。"
+    html = client.get(f"/script-generations/{generation['generation_id']}/script").get_data(as_text=True)
+    assert "第一段修改后。" in html
+    assert "第二段也修改。" in html
+
+
+def test_script_rag_builds_vector_index_and_assists_rewrite(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    build_response = client.post(f"/api/script/generations/{generation['generation_id']}/rag/build")
+
+    assert build_response.status_code == 200
+    assert build_response.get_json()["chunk_count"] >= 1
+
+    assist_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"selection": "智人开局，装备一般", "instruction": "参考文明迁徙内容重写"},
+    )
+
+    assert assist_response.status_code == 200
+    payload = assist_response.get_json()
+    assert "replacement" in payload["result"]
+    assert payload["contexts"]
+    assert "DeepSeek 整理后的自然正文" in provider.edit_payload["contexts"][0]["text"]
+    assert provider.edit_payload["script"]["article"]
+    assert provider.edit_payload["script"]["causal_chain"] == ["智人开局 → 故事系统上线"]
+
+    chat_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"selection": "", "instruction": "你好"},
+    )
+
+    assert chat_response.status_code == 200
+    assert chat_response.get_json()["result"]["replacement"] == ""
+    assert provider.edit_payload["selection"] == ""
+    assert provider.edit_payload["instruction"] == "你好"
+    assert provider.edit_payload["script"]["article"]
+
+    confirm_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"selection": "", "instruction": "可以，就按这个改"},
+    )
+
+    assert confirm_response.status_code == 200
+    confirm_payload = confirm_response.get_json()
+    assert confirm_payload["result"]["applied"] is True
+    updated = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3").find_script_generation(
+        generation["generation_id"]
+    )
+    assert "火和烹饪让食物更容易消化" in updated["script"]["article"]
+    assert "这波不是迁徙，是人类大型开图。" in updated["script"]["article"]
+
+    with sqlite3.connect(tmp_path / "outputs" / "material_workstation.sqlite3") as connection:
+        message_count = connection.execute(
+            "SELECT COUNT(*) FROM script_assistant_messages WHERE generation_id = ?",
+            (generation["generation_id"],),
+        ).fetchone()[0]
+    assert message_count >= 6
+
+
+def test_script_assistant_keeps_conversation_context_between_turns(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    client.post(f"/api/script/generations/{generation['generation_id']}/rag/build")
+
+    first_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"selection": "智人开局，装备一般", "instruction": "加几个疑问句开头"},
+    )
+    followup_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"selection": "", "instruction": "不，疑问应该放在开头，然后再进入原文"},
+    )
+
+    assert first_response.status_code == 200
+    assert followup_response.status_code == 200
+    conversation = provider.edit_payload["conversation"]
+    assert any(item["role"] == "user" and "加几个疑问句开头" in item["content"] for item in conversation)
+    assert any(item["role"] == "assistant" and "这段可以补充" in item["content"] for item in conversation)
+    assert any(item["selection"] == "智人开局，装备一般" for item in conversation)
+
+
+def test_script_assistant_applies_pending_edit_when_user_says_start_modifying(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    client.post(f"/api/script/generations/{generation['generation_id']}/rag/build")
+
+    assist_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"selection": "智人开局，装备一般", "instruction": "为我修改这里，加上疑问句开头"},
+    )
+    apply_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"selection": "", "instruction": "那请你开始为我修改"},
+    )
+
+    assert assist_response.status_code == 200
+    assert apply_response.status_code == 200
+    payload = apply_response.get_json()
+    assert payload["result"]["applied"] is True
+    updated = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3").find_script_generation(
+        generation["generation_id"]
+    )
+    assert "火和烹饪让食物更容易消化" in updated["script"]["article"]
+
+
+def test_script_assistant_history_restores_messages_for_selected_text(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    client.post(f"/api/script/generations/{generation['generation_id']}/rag/build")
+
+    client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist",
+        json={"selection": "智人开局，装备一般", "instruction": "加几个疑问句开头"},
+    )
+
+    response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/assist/history",
+        json={"selection": " 智人开局，装备一般[1] "},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["selection"] == " 智人开局，装备一般[1] "
+    assert payload["match_count"] >= 2
+    assert [message["role"] for message in payload["messages"]] == ["user", "assistant"]
+    assert payload["messages"][0]["content"] == "加几个疑问句开头"
+    assert payload["messages"][1]["replacement"] == "火和烹饪让食物更容易消化，也减少了咀嚼时间，于是更多能量可以供给大脑。"
+
+
+def test_timeline_generation_updates_material_vector_index(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+
+    response = client.post("/api/materials/demo/timeline")
+
+    assert response.status_code == 200
+    store = LocalVectorStore(tmp_path / "outputs" / "material_rag.sqlite3")
+    results = store.search("DeepSeek 整理后的自然正文 文明 迁徙", record_ids=["demo"], limit=1)
+    assert results
+    assert "DeepSeek 整理后的自然正文" in results[0]["text"]
+
+
+def test_script_reader_uses_chinese_article_typography():
+    styles = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "styles.css").read_text(encoding="utf-8")
+    reader_script = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "script_reader.js").read_text(encoding="utf-8")
+    article_rule = styles[styles.index(".script-article-card p {") : styles.index(".script-article-card p:last-child")]
+    article_card_rule = styles[styles.index(".script-article-card {") : styles.index(".script-article-card p {")]
+    page_shell_rule = styles[styles.index(".script-page-shell {") : styles.index(".script-page-hero")]
+    workspace_rule = styles[styles.index(".script-reader-workspace {") : styles.index(".script-editor-toolbar")]
+    main_rule = styles[styles.index(".script-reader-main {") : styles.index(".script-editor-toolbar")]
+    toolbar_rule = styles[styles.index(".script-editor-toolbar {") : styles.index(".script-editor-toolbar h3")]
+    rag_rule = styles[styles.index(".script-rag-panel {") : styles.index(".script-rag-head")]
+
+    assert "text-indent: 2em;" in article_rule
+    assert "margin: 0;" in article_rule
+    assert "white-space: pre-line" not in article_rule
+    assert ".script-citation-wrap" in styles
+    assert "[hidden]" in styles
+    assert "display: none !important;" in styles
+    assert "width: min(100vw - 64px, 1420px);" in page_shell_rule
+    assert "grid-template-columns: minmax(0, 1fr) 430px;" in workspace_rule
+    assert "gap: 28px;" in workspace_rule
+    assert "max-width: 100%;" in article_card_rule
+    assert "max-width: 100%;" in toolbar_rule
+    assert "height: calc(100vh - 180px);" in workspace_rule
+    assert "overflow-y: auto;" in main_rule
+    assert "position: sticky;" in rag_rule
+    assert "top: 18px;" in rag_rule
+    assert "height: 100%;" in rag_rule
+    assert ".script-rag-message::before" in styles
+    assert '.script-rag-message.user::before' in styles
+    assert '.script-rag-message.assistant::before' in styles
+    assert 'content: "你";' in styles
+    assert 'content: "AI";' in styles
+    assert 'display.addEventListener("mousedown"' in reader_script
+    assert 'document.addEventListener("mouseup", syncSelectionAfterPointerUp)' in reader_script
+    assert 'document.addEventListener("touchend", syncSelectionAfterPointerUp)' in reader_script
+    assert 'display.addEventListener("keyup"' in reader_script
+    assert "selectionchange" not in reader_script
+    assert "isPointerSelecting" in reader_script
+    assert "选中内容：" not in reader_script
+    assert "我的要求：" not in reader_script
+    assert "formatSelectedQuote" in reader_script
+    assert "stripSelectedQuoteFromInstruction" in reader_script
+    assert "loadSelectionHistory" in reader_script
+    assert "/assist/history" in reader_script
+
+
+def test_timeline_api_can_force_rebuild_existing_timeline(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+    timeline_provider = FakeTimelineProvider()
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=timeline_provider,
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+    first_call_count = timeline_provider.calls
+
+    response = client.post("/api/materials/demo/timeline", json={"force": True})
+
+    assert response.status_code == 200
+    assert timeline_provider.calls == first_call_count + 2
+
+
+def test_material_detail_page_links_to_timeline_actions(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+
+    response = client.get("/materials/demo")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "生成时间线" in html
+    assert "/materials/demo/timeline" in html
+
+
+def test_timeline_page_renders_event_modules(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    pdf_path = library / "demo.pdf"
+    create_pdf(pdf_path)
+
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+    )
+    client = app.test_client()
+    client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
+    client.post("/api/materials/demo/timeline")
+
+    response = client.get("/materials/demo/timeline")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "全书时间线" in html
+    assert "约公元前 200000 年至公元前 50000 年" in html
+    assert "非洲及早期智人扩散区域" in html
+    assert "原文给出章节时间范围" in html
+    assert "/materials/demo/chapters/ch01" in html

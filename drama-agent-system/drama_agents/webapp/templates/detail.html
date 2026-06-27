@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ record.book_name }} - 章节详情</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260619e">
+  </head>
+  <body>
+    <main class="detail-shell">
+      <a class="back-link" href="/">返回材料准备</a>
+      <section class="detail-hero">
+        <div>
+          <div class="eyebrow">章节详情</div>
+          <h1>{{ record.book_name }}</h1>
+        </div>
+        <div class="detail-stats">
+          <div><strong>{{ record.page_count }}</strong><span>页/单元</span></div>
+          <div><strong>{{ record.chapter_count }}</strong><span>章</span></div>
+          <div><strong>{{ record.total_words }}</strong><span>字</span></div>
+          <div><strong>{{ record.refined_chapter_count or 0 }}</strong><span>精提取</span></div>
+        </div>
+      </section>
+
+      <section class="detail-card">
+        <div class="detail-actions">
+          <a href="{{ record.links.chapter_review }}" target="_blank">章节审查</a>
+          <a href="{{ record.links.qa_report }}" target="_blank">QA 报告</a>
+          <a href="{{ record.links.manifest }}" target="_blank">Manifest</a>
+          <button class="inline-action" type="button" id="generateTimelineButton" data-record-id="{{ record.record_id }}">
+            {% if record.timeline_event_count %}重新生成时间线{% else %}生成时间线{% endif %}
+          </button>
+          {% if record.timeline_event_count %}
+            <a href="{{ record.timeline_url }}">查看时间线 · {{ record.timeline_event_count }} 事件</a>
+          {% else %}
+            <a href="{{ record.timeline_url }}">时间线</a>
+          {% endif %}
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>标题</th>
+              <th>页码</th>
+              <th>字数</th>
+              <th>阅读器</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for chapter in chapters %}
+              <tr>
+                <td>{{ chapter.chapter_id }}</td>
+                <td><a class="chapter-title-link" href="{{ chapter.reader_url }}">{{ chapter.title }}</a></td>
+                <td>{{ chapter.start_page }}-{{ chapter.end_page }}</td>
+                <td>{{ chapter.word_count }}</td>
+                <td><a class="chapter-title-link" href="{{ chapter.reader_url }}">进入阅读器</a></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    </main>
+    <script>
+      const timelineButton = document.querySelector("#generateTimelineButton");
+      if (timelineButton) {
+        timelineButton.addEventListener("click", async () => {
+          timelineButton.disabled = true;
+          timelineButton.textContent = "正在生成时间线...";
+          const recordId = timelineButton.dataset.recordId;
+          const response = await fetch(`/api/materials/${encodeURIComponent(recordId)}/timeline`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ force: true }),
+          });
+          if (response.ok) {
+            window.location.href = `/materials/${encodeURIComponent(recordId)}/timeline`;
+            return;
+          }
+          const payload = await response.json().catch(() => ({}));
+          timelineButton.disabled = false;
+          timelineButton.textContent = payload.error || "生成失败";
+        });
+      }
+    </script>
+  </body>
+</html>
