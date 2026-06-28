@@ -18,6 +18,7 @@ from drama_agents.script_assistant import ScriptAssistantController
 from drama_agents.storage import MaterialDatabase
 from drama_agents.timeline_builder import TimelineBuilder, result_to_payload as timeline_result_to_payload
 from drama_agents.vector_store import LocalVectorStore, build_material_chunks
+from drama_agents.visual_subject_agent import VisualSubjectAgent
 
 
 ALLOWED_UPLOADS = SUPPORTED_MATERIAL_EXTENSIONS
@@ -30,6 +31,7 @@ def create_app(
     refiner_provider=ENV_PROVIDER,
     timeline_provider=ENV_PROVIDER,
     script_provider=ENV_PROVIDER,
+    subject_provider=ENV_PROVIDER,
 ) -> Flask:
     package_dir = Path(__file__).parent
     app = Flask(
@@ -53,6 +55,11 @@ def create_app(
         TimelineBuilder.from_environment() if timeline_provider is ENV_PROVIDER else TimelineBuilder(timeline_provider)
     )
     script_agent = ScriptAgent.from_environment() if script_provider is ENV_PROVIDER else ScriptAgent(script_provider)
+    visual_subject_agent = (
+        VisualSubjectAgent.from_environment()
+        if subject_provider is ENV_PROVIDER
+        else VisualSubjectAgent(subject_provider)
+    )
     upload_path.mkdir(parents=True, exist_ok=True)
     output_splits_path.mkdir(parents=True, exist_ok=True)
     script_outputs_path.mkdir(parents=True, exist_ok=True)
@@ -232,6 +239,107 @@ def create_app(
         if not generation:
             abort(404)
         return jsonify({"generation": generation})
+
+    @app.route("/api/visual/subjects/extract-from-script", methods=["POST"])
+    def extract_visual_subjects_from_script():
+        payload = request.get_json(silent=True) or {}
+        generation_id = str(payload.get("generation_id") or "").strip()
+        if not generation_id:
+            return jsonify({"error": "缺少剧本 generation_id"}), 400
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        try:
+            extraction = visual_subject_agent.extract(generation)
+            subjects = database.save_visual_subject_extraction(generation_id, extraction)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(
+            {
+                "generation": generation,
+                "subjects": subjects,
+                "script_subject_count": len(subjects),
+                "rejected_candidates": extraction.get("rejected_candidates", []),
+            }
+        )
+
+    @app.route("/api/visual/subjects/extract-from-upload", methods=["POST"])
+    def extract_visual_subjects_from_upload():
+        file = request.files.get("file")
+        if not file or not file.filename:
+            return jsonify({"error": "没有收到上传剧本"}), 400
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown", ".json"}:
+            return jsonify({"error": "暂只支持 TXT / MD / JSON 剧本文件"}), 400
+        filename = secure_filename(file.filename) or f"script{suffix}"
+        destination = unique_path(upload_path / filename)
+        file.save(destination)
+        try:
+            text = destination.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return jsonify({"error": "剧本文件需要是 UTF-8 文本"}), 400
+        generation = script_generation_from_uploaded_text(destination, text)
+        database = MaterialDatabase(database_path)
+        database.save_script_generation(generation)
+        extraction = visual_subject_agent.extract(generation)
+        subjects = database.save_visual_subject_extraction(generation["generation_id"], extraction)
+        return jsonify(
+            {
+                "generation": database.find_script_generation(generation["generation_id"]) or generation,
+                "subjects": subjects,
+                "script_subject_count": len(subjects),
+                "rejected_candidates": extraction.get("rejected_candidates", []),
+            }
+        )
+
+    @app.route("/api/visual/subjects", methods=["GET"])
+    def list_visual_subjects():
+        subjects = MaterialDatabase(database_path).list_visual_subjects()
+        return jsonify({"subjects": subjects, "groups": group_visual_subjects(subjects)})
+
+    @app.route("/api/visual/subjects/<subject_id>", methods=["GET", "PATCH"])
+    def visual_subject_detail(subject_id: str):
+        database = MaterialDatabase(database_path)
+        if request.method == "PATCH":
+            payload = request.get_json(silent=True) or {}
+            try:
+                subject = database.update_visual_subject(subject_id, payload)
+            except KeyError:
+                abort(404)
+            return jsonify({"subject": subject})
+        subject = database.find_visual_subject(subject_id)
+        if not subject:
+            abort(404)
+        return jsonify({"subject": subject})
+
+    @app.route("/api/visual/subjects/<subject_id>/anchor", methods=["POST"])
+    def create_visual_subject_anchor(subject_id: str):
+        if not MaterialDatabase(database_path).find_visual_subject(subject_id):
+            abort(404)
+        return jsonify(
+            {
+                "subject_id": subject_id,
+                "status": "not_configured",
+                "message": "ComfyUI 图片生成接口尚未配置，后续将在这里生成主体锚点图。",
+            }
+        )
+
+    @app.route("/api/script/generations/<generation_id>/visual-subjects", methods=["GET"])
+    def list_generation_visual_subjects(generation_id: str):
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        subjects = database.list_script_visual_subjects(generation_id)
+        return jsonify(
+            {
+                "generation": generation,
+                "subjects": subjects,
+                "subject_count": len(subjects),
+                "status": "parsed" if subjects else "not_parsed",
+            }
+        )
 
     @app.route("/api/script/generations/<generation_id>/article", methods=["PATCH"])
     def update_script_article(generation_id: str):
@@ -509,6 +617,63 @@ def sync_script_generation_files(generation: dict) -> None:
     if markdown_path:
         markdown_path.parent.mkdir(parents=True, exist_ok=True)
         markdown_path.write_text(render_script_markdown(generation), encoding="utf-8")
+
+
+def script_generation_from_uploaded_text(path: Path, text: str) -> dict:
+    payload = read_uploaded_script_payload(path, text)
+    script = payload.get("script") if isinstance(payload.get("script"), dict) else {}
+    article = str(script.get("article") or payload.get("article") or text).strip()
+    title = str(script.get("title") or payload.get("title") or path.stem).strip()
+    topic = str(payload.get("topic") or title).strip()
+    generation_id = f"uploaded-script-{slugify(path.stem) or 'script'}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    return {
+        "generation_id": generation_id,
+        "status": "uploaded",
+        "message": "上传剧本已进入主体解析工作台。",
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "topic": topic,
+        "time_range": str(payload.get("time_range") or ""),
+        "time_start_year": payload.get("time_start_year"),
+        "time_end_year": payload.get("time_end_year"),
+        "selected_record_ids": [],
+        "matched_events": [],
+        "matched_event_count": 0,
+        "script": {
+            "title": title,
+            "logline": str(script.get("logline") or payload.get("logline") or ""),
+            "fact_cards": script.get("fact_cards") or payload.get("fact_cards") or [],
+            "causal_chain": script.get("causal_chain") or payload.get("causal_chain") or [],
+            "outline": script.get("outline") or payload.get("outline") or [],
+            "article": article,
+            "fact_boundaries": script.get("fact_boundaries") or {},
+            "scenes": script.get("scenes") or [],
+        },
+        "subjects": [],
+        "map_shots": [],
+        "json_path": "",
+        "markdown_path": "",
+    }
+
+
+def read_uploaded_script_payload(path: Path, text: str) -> dict:
+    if path.suffix.lower() != ".json":
+        return {"title": path.stem, "article": text}
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return {"title": path.stem, "article": text}
+    return payload if isinstance(payload, dict) else {"title": path.stem, "article": text}
+
+
+def group_visual_subjects(subjects: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for subject in subjects:
+        letter = str(subject.get("first_letter") or "#").upper()
+        grouped.setdefault(letter, []).append(subject)
+    return [
+        {"letter": letter, "subjects": grouped[letter], "count": len(grouped[letter])}
+        for letter in sorted(grouped)
+    ]
 
 
 def is_edit_confirmation(text: str) -> bool:

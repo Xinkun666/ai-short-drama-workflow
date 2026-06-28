@@ -103,7 +103,14 @@ class FakeScriptProvider:
                     "transition": "进入下一段",
                 }
             ],
-            "article": "智人开局，装备一般，但故事系统已经上线。\n\n这波不是迁徙，是人类大型开图。",
+            "article": (
+                "智人开局，装备一般，但故事系统已经上线。\n\n"
+                "这波不是迁徙，是人类大型开图。\n\n"
+                "早期智人群体围着火光讲故事，智人猎人群体在狮子和鬣狗的威胁下协作。"
+                "他们拥有耗能巨大的大脑，也会使用贝壳、赭石板、弓箭和骨针。\n\n"
+                "远处的尼安德特人、直立人和丹尼索瓦人不是背景板，"
+                "他们需要在多个镜头里保持清晰可辨的族群外观。"
+            ),
             "fact_boundaries": {
                 "explicitly_supported": ["测试材料明确支持"],
                 "dramatized_inference": [],
@@ -224,6 +231,24 @@ def test_homepage_renders_script_generation_workspace(tmp_path):
     assert "输入短剧主题" in html
     assert "时间范围" in html
     assert "勾选时间线" in html
+
+
+def test_homepage_renders_scene_builder_workspace(tmp_path):
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "场景搭建" in html
+    assert "主体池" in html
+    assert "场景池" in html
+    assert "剧本分镜" in html
+    assert "选择已有剧本" in html
+    assert "开始解析" in html
+    assert "用于管理东非草原、黎凡特地区、布隆伯斯洞穴" in html
+    assert "用于把剧本拆成镜头卡" in html
 
 
 def test_sources_api_lists_workspace_pdfs(tmp_path):
@@ -692,6 +717,132 @@ def test_script_generation_dedicated_view_pages_render_saved_sections(tmp_path):
     maps_html = maps_response.get_data(as_text=True)
     assert "地点画面" in maps_html
     assert "地点画面尚未生成，可在需要时单独生成" in maps_html
+
+
+def app_with_generated_script(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    return app, client, generation
+
+
+def test_extract_subjects_from_script_returns_core_visual_subjects(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+
+    response = client.post("/api/visual/subjects/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    names = {subject["canonical_name"] for subject in payload["subjects"]}
+    assert {"智人", "早期智人群体", "尼安德特人", "直立人", "丹尼索瓦人"}.issubset(names)
+    assert payload["script_subject_count"] >= 5
+
+
+def test_extract_subjects_rejects_non_consistency_objects(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+
+    response = client.post("/api/visual/subjects/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    subject_names = {subject["canonical_name"] for subject in payload["subjects"]}
+    rejected = {candidate["name"]: candidate["reason"] for candidate in payload["rejected_candidates"]}
+    for name in ["大脑", "火", "狮子", "贝壳", "赭石板", "弓箭", "骨针"]:
+        assert name not in subject_names
+        assert rejected[name]
+
+
+def test_subject_pool_sorted_by_pinyin(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    client.post("/api/visual/subjects/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    response = client.get("/api/visual/subjects")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    group_letters = [group["letter"] for group in payload["groups"]]
+    assert group_letters == sorted(group_letters)
+    assert group_letters[:3] == ["D", "N", "Z"]
+    names = [subject["canonical_name"] for subject in payload["subjects"]]
+    assert names.index("丹尼索瓦人") < names.index("尼安德特人") < names.index("智人")
+
+
+def test_script_subjects_are_linked_to_generation(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    client.post("/api/visual/subjects/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    response = client.get(f"/api/script/generations/{generation['generation_id']}/visual-subjects")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["generation"]["generation_id"] == generation["generation_id"]
+    names = {subject["canonical_name"] for subject in payload["subjects"]}
+    assert "智人" in names
+    sapiens = next(subject for subject in payload["subjects"] if subject["canonical_name"] == "智人")
+    assert sapiens["role_in_script"]
+    assert sapiens["first_appearance"]
+    assert sapiens["is_global_subject"] is True
+
+
+def test_same_subject_is_reused_across_scripts(tmp_path):
+    _app, client, first_generation = app_with_generated_script(tmp_path)
+    client.post("/api/visual/subjects/extract-from-script", json={"generation_id": first_generation["generation_id"]})
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    second_generation = dict(first_generation)
+    second_generation["generation_id"] = "manual-second-script"
+    second_generation["topic"] = "早期智人如何讲故事"
+    second_generation["script"] = dict(first_generation["script"])
+    second_generation["script"]["article"] = "早期智人在洞穴里讲述狩猎经历，现代人类的祖先开始形成共同想象。"
+    database.save_script_generation(second_generation)
+
+    response = client.post("/api/visual/subjects/extract-from-script", json={"generation_id": "manual-second-script"})
+
+    assert response.status_code == 200
+    pool = client.get("/api/visual/subjects").get_json()["subjects"]
+    sapiens_subjects = [subject for subject in pool if subject["canonical_name"] == "智人"]
+    assert len(sapiens_subjects) == 1
+    assert sapiens_subjects[0]["script_count"] == 2
+
+
+def test_subject_detail_contains_visual_identity(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    extraction = client.post(
+        "/api/visual/subjects/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    sapiens = next(subject for subject in extraction["subjects"] if subject["canonical_name"] == "智人")
+
+    response = client.get(f"/api/visual/subjects/{sapiens['subject_id']}")
+
+    assert response.status_code == 200
+    detail = response.get_json()["subject"]
+    assert detail["visual_identity"]["era"]
+    assert detail["visual_identity"]["appearance"]
+    assert detail["consistency_rules"]["must_keep"]
+    assert detail["consistency_rules"]["avoid"]
+    assert detail["visual_prompt"]
+    assert detail["negative_prompt"]
+    assert detail["appearances"][0]["generation_id"] == generation["generation_id"]
+
+
+def test_rejected_candidates_are_saved_or_returned(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+
+    response = client.post("/api/visual/subjects/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    assert response.status_code == 200
+    rejected = response.get_json()["rejected_candidates"]
+    assert rejected
+    assert all(candidate["name"] and candidate["reason"] for candidate in rejected)
 
 
 def create_generated_script(client):

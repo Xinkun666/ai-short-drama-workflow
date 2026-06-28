@@ -4,13 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AI短剧工作站</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260622b">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260628a">
   </head>
   <body>
     <main class="prepare-shell">
       <nav class="station-nav" aria-label="工作站导航">
         <button class="nav-tab active" type="button" data-view-tab="materials">材料准备</button>
         <button class="nav-tab" type="button" data-view-tab="script">剧本生成</button>
+        <button class="nav-tab" type="button" data-view-tab="scene">场景搭建</button>
       </nav>
 
       <section class="workspace-panel active" id="materialsView" data-view-panel="materials">
@@ -137,8 +138,82 @@
           </div>
         </section>
       </section>
+
+      <section class="workspace-panel" id="sceneView" data-view-panel="scene" hidden>
+        <header class="station-header">
+          <div>
+            <div class="eyebrow">AI短剧工作站</div>
+            <h1>场景搭建</h1>
+          </div>
+          <div class="stage-tag">第三步：主体与场景资产</div>
+        </header>
+
+        <section class="scene-builder-shell" aria-label="场景搭建工作区">
+          <div class="scene-module-tabs" aria-label="场景搭建子模块">
+            <button class="scene-module-tab active" type="button" data-scene-tab="subjects">主体池</button>
+            <button class="scene-module-tab" type="button" data-scene-tab="scenes">场景池</button>
+            <button class="scene-module-tab" type="button" data-scene-tab="storyboard">剧本分镜</button>
+          </div>
+
+          <section class="scene-module-panel active" data-scene-panel="subjects">
+            <div class="visual-subject-controls">
+              <input id="visualScriptFileInput" type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" hidden>
+              <button class="command-button secondary" id="visualUploadButton" type="button">上传剧本</button>
+              <label class="visual-select-field" for="visualScriptSelect">
+                <span>选择已有剧本</span>
+                <select id="visualScriptSelect"></select>
+              </label>
+              <button class="command-button primary" id="visualExtractButton" type="button">开始解析</button>
+              <div class="visual-status" id="visualStatus">请选择已有剧本或上传剧本后开始解析。</div>
+              <div class="visual-current-script" id="visualCurrentScript">当前解析剧本：未选择</div>
+            </div>
+
+            <div class="visual-subject-workspace">
+              <section class="visual-subject-pool" aria-label="全局主体池">
+                <div class="records-header">
+                  <span>全局主体池</span>
+                  <button class="text-button" id="refreshVisualSubjectsButton" type="button">刷新</button>
+                </div>
+                <div id="visualSubjectPool" class="visual-subject-group-list"></div>
+              </section>
+
+              <section class="visual-script-subjects" aria-label="按剧本查看主体">
+                <div class="records-header">
+                  <span>按剧本查看</span>
+                  <button class="text-button" id="refreshVisualScriptSubjectsButton" type="button">读取</button>
+                </div>
+                <div id="visualScriptSubjects" class="visual-script-subject-list"></div>
+                <div class="visual-rejected-box">
+                  <strong>被拒绝候选</strong>
+                  <div id="visualRejectedCandidates"></div>
+                </div>
+              </section>
+
+              <section class="visual-subject-detail" aria-label="主体详情">
+                <div class="records-header">
+                  <span>主体详情</span>
+                  <button class="text-button" id="visualAnchorButton" type="button" hidden>生成主体锚点图</button>
+                </div>
+                <div id="visualSubjectDetail" class="visual-subject-detail-body">点击主体卡片后查看视觉身份、一致性规则和出现剧本。</div>
+              </section>
+            </div>
+          </section>
+
+          <section class="scene-module-panel" data-scene-panel="scenes" hidden>
+            <div class="scene-placeholder">
+              用于管理东非草原、黎凡特地区、布隆伯斯洞穴、红海海口、巽他大陆等需要保持一致的环境场景。后续支持从剧本分镜中自动提取。
+            </div>
+          </section>
+
+          <section class="scene-module-panel" data-scene-panel="storyboard" hidden>
+            <div class="scene-placeholder">
+              用于把剧本拆成镜头卡，后续每个镜头会绑定主体、场景、旁白、画面提示词和视频生成任务。
+            </div>
+          </section>
+        </section>
+      </section>
     </main>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=20260622a"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=20260628a"></script>
   </body>
 </html>

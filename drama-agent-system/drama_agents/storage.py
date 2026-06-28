@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import sqlite3
 from datetime import datetime
@@ -200,6 +201,39 @@ class MaterialDatabase:
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS visual_subjects (
+                    subject_id TEXT PRIMARY KEY,
+                    canonical_name TEXT NOT NULL,
+                    pinyin_key TEXT NOT NULL DEFAULT '',
+                    first_letter TEXT NOT NULL DEFAULT '',
+                    subject_type TEXT NOT NULL DEFAULT '',
+                    short_description TEXT NOT NULL DEFAULT '',
+                    visual_identity_json TEXT NOT NULL DEFAULT '{}',
+                    consistency_rules_json TEXT NOT NULL DEFAULT '{}',
+                    negative_rules_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    anchor_asset_id TEXT NOT NULL DEFAULT '',
+                    visual_prompt TEXT NOT NULL DEFAULT '',
+                    negative_prompt TEXT NOT NULL DEFAULT '',
+                    workflow_name TEXT NOT NULL DEFAULT '',
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS script_visual_subjects (
+                    generation_id TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    role_in_script TEXT NOT NULL DEFAULT '',
+                    importance INTEGER NOT NULL DEFAULT 0,
+                    first_appearance TEXT NOT NULL DEFAULT '',
+                    evidence_text TEXT NOT NULL DEFAULT '',
+                    extraction_confidence TEXT NOT NULL DEFAULT '',
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY(generation_id, subject_id),
+                    FOREIGN KEY (subject_id) REFERENCES visual_subjects(subject_id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_material_chapters_record
                     ON material_chapters(record_id, chapter_id);
                 CREATE INDEX IF NOT EXISTS idx_timeline_events_record
@@ -212,6 +246,12 @@ class MaterialDatabase:
                     ON script_assistant_conversations(generation_id, is_archived, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_script_edit_patches_generation
                     ON script_edit_patches(generation_id, status, created_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_subjects_canonical
+                    ON visual_subjects(canonical_name);
+                CREATE INDEX IF NOT EXISTS idx_visual_subjects_sort
+                    ON visual_subjects(first_letter, pinyin_key, canonical_name);
+                CREATE INDEX IF NOT EXISTS idx_script_visual_subjects_generation
+                    ON script_visual_subjects(generation_id, importance DESC, subject_id);
                 """
             )
             ensure_table_columns(
@@ -259,6 +299,16 @@ class MaterialDatabase:
                     "start_offset": "INTEGER",
                     "end_offset": "INTEGER",
                     "article_version_hash": "TEXT NOT NULL DEFAULT ''",
+                },
+            )
+            ensure_table_columns(
+                connection,
+                "visual_subjects",
+                {
+                    "visual_prompt": "TEXT NOT NULL DEFAULT ''",
+                    "negative_prompt": "TEXT NOT NULL DEFAULT ''",
+                    "workflow_name": "TEXT NOT NULL DEFAULT ''",
+                    "raw_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
             )
             self.ensure_legacy_script_assistant_conversations(connection)
@@ -515,6 +565,195 @@ class MaterialDatabase:
         with self.connect() as connection:
             connection.execute("DELETE FROM script_generations WHERE generation_id = ?", (generation_id,))
         return self.list_script_generations()
+
+    def save_visual_subject_extraction(
+        self,
+        generation_id: str,
+        extraction: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not self.find_script_generation(generation_id):
+            raise KeyError(generation_id)
+        raw_subjects = extraction.get("subjects") if isinstance(extraction, dict) else []
+        subjects = [normalize_visual_subject_payload(subject) for subject in raw_subjects or [] if isinstance(subject, dict)]
+        with self.connect() as connection:
+            connection.execute("DELETE FROM script_visual_subjects WHERE generation_id = ?", (generation_id,))
+            for subject in subjects:
+                existing = connection.execute(
+                    "SELECT subject_id FROM visual_subjects WHERE canonical_name = ?",
+                    (subject["canonical_name"],),
+                ).fetchone()
+                if existing:
+                    subject["subject_id"] = existing["subject_id"]
+                connection.execute(
+                    """
+                    INSERT INTO visual_subjects (
+                        subject_id, canonical_name, pinyin_key, first_letter, subject_type,
+                        short_description, visual_identity_json, consistency_rules_json,
+                        negative_rules_json, status, anchor_asset_id, visual_prompt,
+                        negative_prompt, workflow_name, raw_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT(subject_id) DO UPDATE SET
+                        canonical_name=excluded.canonical_name,
+                        pinyin_key=excluded.pinyin_key,
+                        first_letter=excluded.first_letter,
+                        subject_type=excluded.subject_type,
+                        short_description=excluded.short_description,
+                        visual_identity_json=excluded.visual_identity_json,
+                        consistency_rules_json=excluded.consistency_rules_json,
+                        negative_rules_json=excluded.negative_rules_json,
+                        status=excluded.status,
+                        anchor_asset_id=excluded.anchor_asset_id,
+                        visual_prompt=excluded.visual_prompt,
+                        negative_prompt=excluded.negative_prompt,
+                        workflow_name=excluded.workflow_name,
+                        raw_json=excluded.raw_json,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    visual_subject_values(subject),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO script_visual_subjects (
+                        generation_id, subject_id, role_in_script, importance,
+                        first_appearance, evidence_text, extraction_confidence, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(generation_id, subject_id) DO UPDATE SET
+                        role_in_script=excluded.role_in_script,
+                        importance=excluded.importance,
+                        first_appearance=excluded.first_appearance,
+                        evidence_text=excluded.evidence_text,
+                        extraction_confidence=excluded.extraction_confidence,
+                        raw_json=excluded.raw_json
+                    """,
+                    script_visual_subject_values(generation_id, subject),
+                )
+        return self.list_script_visual_subjects(generation_id)
+
+    def list_visual_subjects(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    visual_subjects.*,
+                    COUNT(DISTINCT script_visual_subjects.generation_id) AS script_count
+                FROM visual_subjects
+                LEFT JOIN script_visual_subjects
+                    ON script_visual_subjects.subject_id = visual_subjects.subject_id
+                GROUP BY visual_subjects.subject_id
+                ORDER BY visual_subjects.first_letter, visual_subjects.pinyin_key, visual_subjects.canonical_name
+                """
+            ).fetchall()
+        return [visual_subject_from_row(row) for row in rows]
+
+    def find_visual_subject(self, subject_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    visual_subjects.*,
+                    COUNT(DISTINCT script_visual_subjects.generation_id) AS script_count
+                FROM visual_subjects
+                LEFT JOIN script_visual_subjects
+                    ON script_visual_subjects.subject_id = visual_subjects.subject_id
+                WHERE visual_subjects.subject_id = ?
+                GROUP BY visual_subjects.subject_id
+                """,
+                (subject_id,),
+            ).fetchone()
+            if not row:
+                return None
+            appearances = connection.execute(
+                """
+                SELECT
+                    script_visual_subjects.*,
+                    script_generations.topic,
+                    script_generations.created_at,
+                    script_generations.time_range
+                FROM script_visual_subjects
+                LEFT JOIN script_generations
+                    ON script_generations.generation_id = script_visual_subjects.generation_id
+                WHERE script_visual_subjects.subject_id = ?
+                ORDER BY script_generations.created_at DESC, script_visual_subjects.importance DESC
+                """,
+                (subject_id,),
+            ).fetchall()
+        subject = visual_subject_from_row(row)
+        subject["appearances"] = [visual_subject_appearance_from_row(appearance) for appearance in appearances]
+        return subject
+
+    def list_script_visual_subjects(self, generation_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    script_visual_subjects.generation_id,
+                    script_visual_subjects.role_in_script,
+                    script_visual_subjects.importance,
+                    script_visual_subjects.first_appearance,
+                    script_visual_subjects.evidence_text,
+                    script_visual_subjects.extraction_confidence,
+                    script_visual_subjects.raw_json AS script_subject_raw_json,
+                    visual_subjects.*,
+                    1 AS script_count
+                FROM script_visual_subjects
+                JOIN visual_subjects
+                    ON visual_subjects.subject_id = script_visual_subjects.subject_id
+                WHERE script_visual_subjects.generation_id = ?
+                ORDER BY script_visual_subjects.importance DESC, visual_subjects.pinyin_key
+                """,
+                (generation_id,),
+            ).fetchall()
+        return [script_visual_subject_from_row(row) for row in rows]
+
+    def update_visual_subject(self, subject_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+        current = self.find_visual_subject(subject_id)
+        if not current:
+            raise KeyError(subject_id)
+        merged = dict(current)
+        for key in (
+            "canonical_name",
+            "subject_type",
+            "short_description",
+            "visual_identity",
+            "consistency_rules",
+            "negative_rules",
+            "status",
+            "anchor_asset_id",
+            "visual_prompt",
+            "negative_prompt",
+            "workflow_name",
+        ):
+            if key in updates:
+                merged[key] = updates[key]
+        normalized = normalize_visual_subject_payload(merged)
+        normalized["subject_id"] = subject_id
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE visual_subjects
+                SET canonical_name = ?,
+                    pinyin_key = ?,
+                    first_letter = ?,
+                    subject_type = ?,
+                    short_description = ?,
+                    visual_identity_json = ?,
+                    consistency_rules_json = ?,
+                    negative_rules_json = ?,
+                    status = ?,
+                    anchor_asset_id = ?,
+                    visual_prompt = ?,
+                    negative_prompt = ?,
+                    workflow_name = ?,
+                    raw_json = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE subject_id = ?
+                """,
+                (*visual_subject_values(normalized)[1:], subject_id),
+            )
+        subject = self.find_visual_subject(subject_id)
+        if not subject:
+            raise KeyError(subject_id)
+        return subject
 
     def ensure_legacy_script_assistant_conversations(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute(
@@ -1319,6 +1558,206 @@ def script_generation_from_row(row: sqlite3.Row) -> dict[str, Any]:
         }
     )
     return result
+
+
+def normalize_visual_subject_payload(subject: dict[str, Any]) -> dict[str, Any]:
+    raw_name = str(subject.get("canonical_name") or subject.get("name") or "").strip()
+    canonical_name = canonical_visual_subject_name(raw_name, subject.get("aliases") or [])
+    visual_identity = subject.get("visual_identity")
+    if not isinstance(visual_identity, dict):
+        visual_identity = {}
+    consistency_rules = subject.get("consistency_rules")
+    if not isinstance(consistency_rules, dict):
+        consistency_rules = {}
+    negative_rules = subject.get("negative_rules")
+    if negative_rules is None:
+        negative_rules = consistency_rules.get("avoid") or []
+    if not isinstance(negative_rules, list):
+        negative_rules = [str(negative_rules)]
+    subject_type = str(subject.get("subject_type") or subject.get("type") or "").strip()
+    short_description = str(
+        subject.get("short_description")
+        or subject.get("description")
+        or subject.get("role_in_script")
+        or ""
+    ).strip()
+    pinyin_key = subject_pinyin_key(canonical_name)
+    first_letter = (pinyin_key[:1] or "Z").upper()
+    normalized = dict(subject)
+    normalized.update(
+        {
+            "subject_id": str(subject.get("subject_id") or stable_visual_subject_id(canonical_name)),
+            "canonical_name": canonical_name,
+            "pinyin_key": pinyin_key,
+            "first_letter": first_letter,
+            "subject_type": subject_type,
+            "short_description": short_description,
+            "visual_identity": visual_identity,
+            "consistency_rules": consistency_rules,
+            "negative_rules": [str(item) for item in negative_rules if str(item).strip()],
+            "status": str(subject.get("status") or "draft"),
+            "anchor_asset_id": str(subject.get("anchor_asset_id") or ""),
+            "visual_prompt": str(subject.get("visual_prompt") or build_visual_prompt(canonical_name, visual_identity)),
+            "negative_prompt": str(
+                subject.get("negative_prompt")
+                or "，".join([str(item) for item in consistency_rules.get("avoid", []) if str(item).strip()])
+            ),
+            "workflow_name": str(subject.get("workflow_name") or "subject_anchor_v1"),
+            "role_in_script": str(subject.get("role_in_script") or ""),
+            "importance": int(subject.get("importance") or 0),
+            "first_appearance": str(subject.get("first_appearance") or ""),
+            "evidence_text": str(subject.get("evidence_text") or subject.get("first_appearance") or ""),
+            "extraction_confidence": str(subject.get("extraction_confidence") or ""),
+        }
+    )
+    return normalized
+
+
+def visual_subject_values(subject: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        subject["subject_id"],
+        subject["canonical_name"],
+        subject["pinyin_key"],
+        subject["first_letter"],
+        subject["subject_type"],
+        subject["short_description"],
+        json_dumps(subject.get("visual_identity") or {}),
+        json_dumps(subject.get("consistency_rules") or {}),
+        json_dumps(subject.get("negative_rules") or []),
+        subject.get("status", "draft"),
+        subject.get("anchor_asset_id", ""),
+        subject.get("visual_prompt", ""),
+        subject.get("negative_prompt", ""),
+        subject.get("workflow_name", ""),
+        json_dumps(subject),
+    )
+
+
+def script_visual_subject_values(generation_id: str, subject: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        generation_id,
+        subject["subject_id"],
+        subject.get("role_in_script", ""),
+        int(subject.get("importance") or 0),
+        subject.get("first_appearance", ""),
+        subject.get("evidence_text", ""),
+        subject.get("extraction_confidence", ""),
+        json_dumps(subject),
+    )
+
+
+def visual_subject_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    raw = json_loads(row["raw_json"], default={})
+    visual_identity = json_loads(row["visual_identity_json"], default={})
+    consistency_rules = json_loads(row["consistency_rules_json"], default={})
+    negative_rules = json_loads(row["negative_rules_json"], default=[])
+    subject = dict(raw)
+    subject.update(
+        {
+            "subject_id": row["subject_id"],
+            "canonical_name": row["canonical_name"],
+            "pinyin_key": row["pinyin_key"],
+            "first_letter": row["first_letter"],
+            "subject_type": row["subject_type"],
+            "short_description": row["short_description"],
+            "visual_identity": visual_identity,
+            "consistency_rules": consistency_rules,
+            "negative_rules": negative_rules,
+            "status": row["status"],
+            "anchor_asset_id": row["anchor_asset_id"],
+            "visual_prompt": row["visual_prompt"],
+            "negative_prompt": row["negative_prompt"],
+            "workflow_name": row["workflow_name"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "script_count": int(row["script_count"] or 0) if "script_count" in row.keys() else 0,
+            "has_visual_identity": bool(visual_identity),
+            "has_anchor_asset": bool(row["anchor_asset_id"]),
+        }
+    )
+    return subject
+
+
+def script_visual_subject_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    subject = visual_subject_from_row(row)
+    raw = json_loads(row["script_subject_raw_json"], default={})
+    subject.update(
+        {
+            "generation_id": row["generation_id"],
+            "role_in_script": row["role_in_script"],
+            "importance": row["importance"],
+            "first_appearance": row["first_appearance"],
+            "evidence_text": row["evidence_text"],
+            "extraction_confidence": row["extraction_confidence"],
+            "raw": raw,
+            "is_global_subject": True,
+        }
+    )
+    return subject
+
+
+def visual_subject_appearance_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "generation_id": row["generation_id"],
+        "topic": row["topic"] or "",
+        "created_at": row["created_at"] or "",
+        "time_range": row["time_range"] or "",
+        "role_in_script": row["role_in_script"],
+        "importance": row["importance"],
+        "first_appearance": row["first_appearance"],
+        "evidence_text": row["evidence_text"],
+        "extraction_confidence": row["extraction_confidence"],
+        "raw": json_loads(row["raw_json"], default={}),
+    }
+
+
+def stable_visual_subject_id(canonical_name: str) -> str:
+    digest = hashlib.sha1(canonical_name.encode("utf-8")).hexdigest()[:12]
+    return f"vs-{digest}"
+
+
+def canonical_visual_subject_name(name: str, aliases: Any = None) -> str:
+    clean_name = str(name or "").strip()
+    alias_values = aliases if isinstance(aliases, list) else []
+    values = {clean_name, *[str(alias).strip() for alias in alias_values]}
+    sapiens_aliases = {"早期智人", "现代智人的祖先", "现代人类的祖先", "人类祖先"}
+    if values & sapiens_aliases:
+        return "智人"
+    return clean_name
+
+
+PINYIN_OVERRIDES = {
+    "阿拉伯半岛智人迁徙群体": "alabobandaozhirenqianxiqunti",
+    "丹尼索瓦人": "dannisuowaren",
+    "尼安德特人": "niandeteren",
+    "早期智人群体": "zaoqizhirenqunti",
+    "智人": "zhiren",
+    "智人部落老者": "zhirenbuluolaozhe",
+    "智人猎人群体": "zhirenlierenqunti",
+    "直立人": "zhiliren",
+}
+
+
+def subject_pinyin_key(name: str) -> str:
+    clean_name = str(name or "").strip()
+    if clean_name in PINYIN_OVERRIDES:
+        return PINYIN_OVERRIDES[clean_name]
+    if clean_name and clean_name[0].isascii():
+        return re.sub(r"[^0-9a-z]+", "", clean_name.lower()) or "z"
+    return f"z{clean_name}"
+
+
+def build_visual_prompt(canonical_name: str, visual_identity: dict[str, Any]) -> str:
+    parts = [
+        canonical_name,
+        str(visual_identity.get("era") or ""),
+        str(visual_identity.get("region") or ""),
+        str(visual_identity.get("appearance") or ""),
+        str(visual_identity.get("clothing") or ""),
+        str(visual_identity.get("body_language") or ""),
+        str(visual_identity.get("group_composition") or ""),
+    ]
+    return "，".join(part for part in parts if part)
 
 
 def script_assistant_message_from_row(row: sqlite3.Row) -> dict[str, Any]:
