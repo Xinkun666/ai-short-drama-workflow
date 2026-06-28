@@ -6,6 +6,8 @@ from drama_agents.visual_anchor_agent import (
     ChainedImageProvider,
     OpenAIImageProvider,
     VisualAnchorAgent,
+    build_scene_anchor_negative_prompt,
+    build_scene_anchor_prompt,
     build_subject_anchor_negative_prompt,
     build_subject_anchor_prompt,
 )
@@ -71,6 +73,73 @@ def test_subject_anchor_prompt_is_single_subject_reference_only():
     assert "不要多个主体" in negative_prompt
     assert "不要地图背景" in negative_prompt
     assert "不要信息图文字" in negative_prompt
+
+
+def test_scene_anchor_prompt_is_environment_reference_only():
+    scene = {
+        "canonical_name": "东非稀树草原",
+        "scene_type": "natural_environment",
+        "short_description": "智人迁徙开场环境",
+        "visual_identity": {
+            "era": "旧石器时代",
+            "region": "东非",
+            "terrain": "开阔稀树草原",
+            "weather": "干热微尘",
+            "lighting": "强烈自然光",
+            "palette": "黄褐色、暗绿色",
+            "mood": "危险、辽阔",
+            "typical_elements": ["稀树", "枯草", "动物剪影"],
+        },
+        "consistency_rules": {
+            "must_keep": ["开阔草地", "远处低矮树木"],
+            "avoid": ["现代城市"],
+        },
+    }
+
+    prompt = build_scene_anchor_prompt(scene)
+    negative_prompt = build_scene_anchor_negative_prompt(scene)
+
+    assert "只生成环境空间" in prompt
+    assert "场景锚点图" in prompt
+    assert "东非稀树草原" in prompt
+    assert "不要主体人物大特写" in prompt
+    assert "不要单个道具特写" in negative_prompt
+    assert "不要现代城市" in negative_prompt
+
+
+def test_visual_anchor_agent_generates_scene_anchor_asset(tmp_path):
+    class FakeProvider:
+        def __init__(self):
+            self.calls = []
+
+        def generate_image(self, *, prompt, negative_prompt):
+            self.calls.append({"prompt": prompt, "negative_prompt": negative_prompt})
+            return {
+                "image_bytes": b"scene-image",
+                "mime_type": "image/png",
+                "model": "fake-seeddream",
+                "provider": "ark",
+            }
+
+    provider = FakeProvider()
+    agent = VisualAnchorAgent(provider=provider)
+    scene = {
+        "scene_id": "scene-001",
+        "canonical_name": "东非稀树草原",
+        "scene_type": "natural_environment",
+        "short_description": "智人迁徙开场环境",
+        "visual_identity": {"terrain": "开阔稀树草原", "typical_elements": ["稀树"]},
+    }
+
+    result = agent.generate_scene_anchor(scene=scene, output_dir=tmp_path)
+
+    assert result["asset_path"] == tmp_path / "scene-001" / "anchor.png"
+    assert result["asset_path"].read_bytes() == b"scene-image"
+    assert result["provider"] == "ark"
+    assert result["model"] == "fake-seeddream"
+    assert result["workflow_name"] == "ark_seeddream_scene_anchor_v1"
+    assert "东非稀树草原" in provider.calls[0]["prompt"]
+    assert "只生成环境空间" in provider.calls[0]["prompt"]
 
 
 def test_ark_provider_uses_authorized_seedream_request_shape(monkeypatch):

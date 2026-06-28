@@ -3110,6 +3110,18 @@ th {
   padding: 4px 7px;
 }
 
+.visual-phase-badge {
+  width: fit-content;
+  border-radius: 999px;
+  background: #eef6ff;
+  color: #2563eb;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 820;
+  line-height: 1;
+  padding: 5px 8px;
+}
+
 .visual-subject-card p {
   display: -webkit-box;
   overflow: hidden;

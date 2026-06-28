@@ -227,8 +227,74 @@
           </section>
 
           <section class="scene-module-panel" data-scene-panel="scenes" hidden>
-            <div class="scene-placeholder">
-              用于管理东非草原、黎凡特地区、布隆伯斯洞穴、红海海口、巽他大陆等需要保持一致的环境场景。后续支持从剧本分镜中自动提取。
+            <div class="visual-subject-toolbar visual-scene-toolbar">
+              <div class="visual-subject-title">
+                <div>
+                  <h2>场景池</h2>
+                  <p>管理短剧中需要保持视觉一致的环境空间，为后续 ComfyUI 场景锚点图、分镜关键帧和视频生成做准备。</p>
+                </div>
+                <div class="visual-mode-tabs" aria-label="场景池查看方式">
+                  <button class="visual-mode-tab active" type="button" data-visual-scene-mode="all">所有场景</button>
+                  <button class="visual-mode-tab" type="button" data-visual-scene-mode="scripts">剧本场景</button>
+                </div>
+              </div>
+              <input id="sceneScriptFileInput" type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" hidden>
+              <div class="visual-toolbar-controls">
+                <label class="visual-select-field" for="sceneScriptSelect">
+                  <span>选择已有剧本</span>
+                  <select id="sceneScriptSelect"></select>
+                </label>
+                <button class="visual-button primary" id="sceneExtractButton" type="button">解析场景</button>
+                <button class="visual-button secondary" id="sceneUploadButton" type="button">上传剧本</button>
+              </div>
+              <div class="visual-toolbar-footer">
+                <div class="visual-status" id="sceneStatus">请选择已有剧本或上传剧本后开始解析。</div>
+                <div class="visual-current-script" id="sceneCurrentScript">当前剧本：未选择</div>
+              </div>
+            </div>
+
+            <div class="visual-workbench-grid visual-scene-workbench-grid" id="sceneWorkbenchGrid" data-visual-current-mode="all" data-visual-script-stage="list">
+              <section class="visual-workbench-panel visual-script-panel" aria-label="剧本列表">
+                <div class="visual-panel-head">
+                  <div>
+                    <span>剧本场景</span>
+                    <small>逐个查看剧本，并进入该剧本的场景清单</small>
+                  </div>
+                </div>
+                <div id="sceneScriptList" class="visual-script-list"></div>
+              </section>
+
+              <section class="visual-workbench-panel visual-subject-pool visual-scene-pool" aria-label="全局场景池">
+                <div class="visual-panel-head">
+                  <div>
+                    <span>全局场景池</span>
+                    <small>按拼音首字母分组管理环境空间</small>
+                  </div>
+                  <button class="text-button" id="refreshVisualScenesButton" type="button">刷新</button>
+                </div>
+                <label class="visual-search-box" for="visualSceneSearchInput">
+                  <input id="visualSceneSearchInput" type="search" placeholder="搜索场景，例如：东非稀树草原、布隆伯斯洞穴" autocomplete="off">
+                </label>
+                <div id="scenePool" class="visual-subject-group-list visual-scene-group-list"></div>
+              </section>
+
+              <section class="visual-workbench-panel visual-script-subjects visual-script-scenes" aria-label="当前剧本场景">
+                <div class="visual-panel-head">
+                  <div>
+                    <span>当前剧本场景</span>
+                    <small id="sceneSelectedScriptTitle">未选择剧本</small>
+                  </div>
+                  <div class="visual-panel-actions">
+                    <button class="text-button" type="button" data-scene-script-back>返回剧本列表</button>
+                    <button class="text-button" id="refreshVisualScriptScenesButton" type="button">刷新</button>
+                  </div>
+                </div>
+                <div id="visualScriptScenes" class="visual-script-subject-list visual-script-scene-list"></div>
+                <div class="visual-rejected-box">
+                  <button class="visual-rejected-toggle" type="button" aria-expanded="true">被拒绝候选</button>
+                  <div id="visualSceneRejectedCandidates"></div>
+                </div>
+              </section>
             </div>
           </section>
 

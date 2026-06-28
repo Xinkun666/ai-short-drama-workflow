@@ -7,7 +7,16 @@ from pypdf import PdfWriter
 
 from drama_agents.storage import MaterialDatabase
 from drama_agents.vector_store import LocalVectorStore
-from drama_agents.visual_subject_agent import RuleBasedVisualSubjectProvider
+from drama_agents.visual_scene_agent import (
+    RuleBasedVisualSceneProvider,
+    build_visual_scene_prompt,
+    normalize_scene_extraction_payload,
+)
+from drama_agents.visual_subject_agent import (
+    RuleBasedVisualSubjectProvider,
+    build_visual_subject_prompt,
+    normalize_extraction_payload,
+)
 from drama_agents.webapp.app import create_app
 
 
@@ -106,11 +115,23 @@ class FakeScriptProvider:
             ],
             "article": (
                 "智人开局，装备一般，但故事系统已经上线。\n\n"
+                "镜头从非洲东部的稀树草原拉开，开阔枯草地、低矮灌木和远处动物剪影形成本集的开场环境。\n\n"
+                "非洲智人部落营地里，整个部落一起拉扯孩子、制作工具、分配食物。\n\n"
                 "这波不是迁徙，是人类大型开图。\n\n"
                 "早期智人群体围着火光讲故事，智人猎人群体在狮子和鬣狗的威胁下协作。"
+                "他们在篝火烹饪营地围坐，烤糊的肉和跳动的火光成为群体协作的中心。"
                 "他们拥有耗能巨大的大脑，也会使用贝壳、赭石板、弓箭和骨针。\n\n"
+                "布隆伯斯洞穴里，贝壳珠子和赭石板被摆在岩壁旁，成为符号能力的稳定空间。\n\n"
                 "远处的尼安德特人、直立人和丹尼索瓦人不是背景板，"
-                "他们需要在多个镜头里保持清晰可辨的族群外观。"
+                "他们需要在多个镜头里保持清晰可辨的族群外观。\n\n"
+                "黎凡特地区和地中海东部进入冰河期，智人与尼安德特人在寒冷遭遇地带擦肩而过。\n\n"
+                "多巴火山喷发后，火山灰遮天蔽日，南亚暗无天日，全球气温骤降。\n\n"
+                "索马里一侧的红海海口迁徙渡口前，智人跨过红海望向阿拉伯半岛。\n\n"
+                "他们沿印度洋海岸线前进，经过印度河、恒河、湄公河和多个河口。\n\n"
+                "巽他大陆尽头海峡前，100公里宽的汪洋隔开澳大利亚和巴布亚新几内亚。\n\n"
+                "欧洲的尼安德特人在零下6°C的严冬里守着寒冷营地。\n\n"
+                "最后，洞穴壁画与葬礼仪式空间里，岩壁、壁画、红花和葬礼仪式连接成共同想象。\n\n"
+                "股票市场、CPU 和汽车油箱只作为现代比喻出现，不能进入古史场景池。"
             ),
             "fact_boundaries": {
                 "explicitly_supported": ["测试材料明确支持"],
@@ -262,7 +283,8 @@ def test_homepage_renders_scene_builder_workspace(tmp_path):
     assert "剧本分镜" in html
     assert "选择已有剧本" in html
     assert "解析主体" in html
-    assert "用于管理东非草原、黎凡特地区、布隆伯斯洞穴" in html
+    assert "管理短剧中需要保持视觉一致的环境空间" in html
+    assert "解析场景" in html
     assert "用于把剧本拆成镜头卡" in html
 
 
@@ -373,6 +395,7 @@ def test_visual_subject_detail_page_renders_subject_and_anchor_action(tmp_path):
     assert "视觉身份" in html
     assert "一致性规则" in html
     assert "主体图构建" in html
+    assert "视觉阶段" in html
     assert "获取提示词" in html
     assert "生成主体图" in html
     assert "data-subject-prompt-textarea" in html
@@ -682,6 +705,7 @@ def test_script_generate_api_returns_script_only_with_deferred_subjects_and_map_
         timeline_provider=FakeTimelineProvider(),
         script_provider=FakeScriptProvider(),
         subject_provider=RuleBasedVisualSubjectProvider(),
+        scene_provider=RuleBasedVisualSceneProvider(),
     )
     client = app.test_client()
     client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
@@ -718,6 +742,7 @@ def test_script_generate_api_accepts_numeric_year_inputs(tmp_path):
         timeline_provider=FakeTimelineProvider(),
         script_provider=FakeScriptProvider(),
         subject_provider=RuleBasedVisualSubjectProvider(),
+        scene_provider=RuleBasedVisualSceneProvider(),
     )
     client = app.test_client()
     client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
@@ -879,6 +904,7 @@ def app_with_generated_script(tmp_path):
         timeline_provider=FakeTimelineProvider(),
         script_provider=FakeScriptProvider(),
         subject_provider=RuleBasedVisualSubjectProvider(),
+        scene_provider=RuleBasedVisualSceneProvider(),
     )
     client = app.test_client()
     generation = create_generated_script(client)
@@ -909,6 +935,43 @@ def test_extract_subjects_rejects_non_consistency_objects(tmp_path):
     for name in ["大脑", "火", "狮子", "贝壳", "赭石板", "弓箭", "骨针"]:
         assert name not in subject_names
         assert rejected[name]
+
+
+def test_visual_subject_prompt_requires_phase_reuse_decision():
+    prompt = build_visual_subject_prompt(
+        {
+            "title": "智人阶段变化",
+            "topic": "智人从采集狩猎到农业定居",
+            "article": "智人先以采集狩猎生活，后来进入农业定居生活。",
+        }
+    )
+
+    assert "visual_phase_label" in prompt
+    assert "同名主体" in prompt
+    assert "能复用" in prompt
+    assert "不同阶段" in prompt
+
+
+def test_subject_extraction_keeps_same_name_different_visual_phases():
+    payload = normalize_extraction_payload(
+        {
+            "subjects": [
+                {
+                    "canonical_name": "智人",
+                    "visual_phase_label": "采集狩猎阶段",
+                    "visual_identity": {"clothing": "兽皮", "body_language": "迁徙狩猎"},
+                },
+                {
+                    "canonical_name": "智人",
+                    "visual_phase_label": "农业定居阶段",
+                    "visual_identity": {"clothing": "粗布", "body_language": "播种收割"},
+                },
+            ]
+        }
+    )
+
+    assert len(payload["subjects"]) == 2
+    assert {subject["visual_phase_label"] for subject in payload["subjects"]} == {"采集狩猎阶段", "农业定居阶段"}
 
 
 def test_subject_pool_sorted_by_pinyin(tmp_path):
@@ -961,6 +1024,76 @@ def test_same_subject_is_reused_across_scripts(tmp_path):
     sapiens_subjects = [subject for subject in pool if subject["canonical_name"] == "智人"]
     assert len(sapiens_subjects) == 1
     assert sapiens_subjects[0]["script_count"] == 2
+
+
+def test_subject_pool_splits_same_name_into_visual_phases(tmp_path):
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    for generation_id, topic in [
+        ("hunter-script", "采集狩猎阶段的智人"),
+        ("farmer-script", "农业定居阶段的智人"),
+    ]:
+        database.save_script_generation(
+            {
+                "generation_id": generation_id,
+                "created_at": "2026-06-28 10:00:00",
+                "topic": topic,
+                "time_range": "测试阶段",
+                "script": {"article": topic},
+                "status": "completed",
+            }
+        )
+
+    hunter_subjects = database.save_visual_subject_extraction(
+        "hunter-script",
+        {
+            "subjects": [
+                {
+                    "canonical_name": "智人",
+                    "visual_phase_label": "采集狩猎阶段",
+                    "subject_type": "species",
+                    "role_in_script": "以迁徙和采集为主的早期智人。",
+                    "importance": 5,
+                    "visual_identity": {
+                        "era": "旧石器时代",
+                        "lifestyle_stage": "采集狩猎",
+                        "appearance": "深色皮肤、粗糙黑发，身形灵活。",
+                        "clothing": "简陋兽皮和植物纤维披挂。",
+                        "props": ["石器", "木矛"],
+                        "body_language": "警觉、迁徙、协作狩猎。",
+                        "group_composition": "小型游动部落。",
+                    },
+                }
+            ]
+        },
+    )
+    farmer_subjects = database.save_visual_subject_extraction(
+        "farmer-script",
+        {
+            "subjects": [
+                {
+                    "canonical_name": "智人",
+                    "visual_phase_label": "农业定居阶段",
+                    "subject_type": "species",
+                    "role_in_script": "以农耕和定居村落为主的智人。",
+                    "importance": 5,
+                    "visual_identity": {
+                        "era": "新石器时代",
+                        "lifestyle_stage": "农业定居",
+                        "appearance": "已经形成村落分工的早期农人。",
+                        "clothing": "粗布、草编和更稳定的工具携带。",
+                        "props": ["陶罐", "石镰", "谷物"],
+                        "body_language": "播种、收割、村落协作。",
+                        "group_composition": "定居家庭和村落群体。",
+                    },
+                }
+            ]
+        },
+    )
+
+    pool = [subject for subject in database.list_visual_subjects() if subject["canonical_name"] == "智人"]
+    assert len(pool) == 2
+    assert {subject["visual_phase_label"] for subject in pool} == {"采集狩猎阶段", "农业定居阶段"}
+    assert hunter_subjects[0]["subject_id"] != farmer_subjects[0]["subject_id"]
 
 
 def test_subject_detail_contains_visual_identity(tmp_path):
@@ -1108,6 +1241,501 @@ def test_rejected_candidates_are_saved_or_returned(tmp_path):
     rejected = response.get_json()["rejected_candidates"]
     assert rejected
     assert all(candidate["name"] and candidate["reason"] for candidate in rejected)
+
+
+def test_extract_scenes_from_script_returns_core_visual_scenes(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+
+    response = client.post("/api/visual/scenes/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    names = {scene["canonical_name"] for scene in payload["scenes"]}
+    assert {
+        "东非稀树草原",
+        "非洲智人部落营地",
+        "篝火烹饪营地",
+        "布隆伯斯洞穴",
+        "红海海口迁徙渡口",
+    }.issubset(names)
+    assert payload["script_scene_count"] >= 5
+
+
+def test_extract_scenes_rejects_props_subjects_and_metaphors(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+
+    response = client.post("/api/visual/scenes/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    scene_names = {scene["canonical_name"] for scene in payload["scenes"]}
+    rejected = {candidate["name"]: candidate["reason"] for candidate in payload["rejected_candidates"]}
+    for name in ["大脑", "火", "贝壳", "弓箭", "智人", "尼安德特人", "股票市场"]:
+        assert name not in scene_names
+        assert rejected[name]
+
+
+def test_visual_scene_api_returns_json_when_generation_is_missing(tmp_path):
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        scene_provider=RuleBasedVisualSceneProvider(),
+    )
+    client = app.test_client()
+
+    response = client.post("/api/visual/scenes/extract-from-script", json={"generation_id": "missing-script"})
+
+    assert response.status_code == 404
+    assert response.is_json
+    assert response.get_json()["error"]
+
+
+def test_visual_scene_prompt_requires_phase_reuse_decision():
+    prompt = build_visual_scene_prompt(
+        {
+            "title": "同一地区的阶段变化",
+            "topic": "东非草原从迁徙通道到农业村落",
+            "article": "东非稀树草原先是智人迁徙通道，后来出现农业村落和田地。",
+        }
+    )
+
+    assert "visual_phase_label" in prompt
+    assert "同名场景" in prompt
+    assert "能复用" in prompt
+    assert "不同阶段" in prompt
+
+
+def test_scene_extraction_keeps_same_name_different_visual_phases():
+    payload = normalize_scene_extraction_payload(
+        {
+            "scenes": [
+                {
+                    "canonical_name": "东非稀树草原",
+                    "visual_phase_label": "采集狩猎迁徙阶段",
+                    "visual_identity": {"terrain": "自然草原迁徙通道", "typical_elements": ["稀树"]},
+                },
+                {
+                    "canonical_name": "东非稀树草原",
+                    "visual_phase_label": "农业定居村落阶段",
+                    "visual_identity": {"terrain": "田地和村落边缘", "typical_elements": ["田地"]},
+                },
+            ]
+        }
+    )
+
+    assert len(payload["scenes"]) == 2
+    assert {scene["visual_phase_label"] for scene in payload["scenes"]} == {"采集狩猎迁徙阶段", "农业定居村落阶段"}
+
+
+def test_save_visual_scene_extraction_reuses_existing_scene(tmp_path):
+    _app, client, first_generation = app_with_generated_script(tmp_path)
+    client.post("/api/visual/scenes/extract-from-script", json={"generation_id": first_generation["generation_id"]})
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    second_generation = dict(first_generation)
+    second_generation["generation_id"] = "manual-second-scene-script"
+    second_generation["topic"] = "智人第二集"
+    second_generation["script"] = dict(first_generation["script"])
+    second_generation["script"]["article"] = "镜头回到非洲东部的稀树草原，智人继续在开阔草地上迁徙。"
+    database.save_script_generation(second_generation)
+
+    response = client.post("/api/visual/scenes/extract-from-script", json={"generation_id": second_generation["generation_id"]})
+
+    assert response.status_code == 200
+    pool = client.get("/api/visual/scenes").get_json()["scenes"]
+    savannas = [scene for scene in pool if scene["canonical_name"] == "东非稀树草原"]
+    assert len(savannas) == 1
+    assert savannas[0]["script_count"] == 2
+
+
+def test_scene_pool_splits_same_name_into_visual_phases(tmp_path):
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    for generation_id, topic in [
+        ("savanna-hunter-script", "采集狩猎阶段的东非草原"),
+        ("savanna-village-script", "农业村落阶段的东非草原"),
+    ]:
+        database.save_script_generation(
+            {
+                "generation_id": generation_id,
+                "created_at": "2026-06-28 10:00:00",
+                "topic": topic,
+                "time_range": "测试阶段",
+                "script": {"article": topic},
+                "status": "completed",
+            }
+        )
+
+    hunter_scenes = database.save_visual_scene_extraction(
+        "savanna-hunter-script",
+        {
+            "scenes": [
+                {
+                    "canonical_name": "东非稀树草原",
+                    "visual_phase_label": "采集狩猎迁徙阶段",
+                    "scene_type": "natural_environment",
+                    "role_in_script": "承载早期智人迁徙和采集狩猎。",
+                    "importance": 5,
+                    "visual_identity": {
+                        "era": "旧石器时代",
+                        "environment_stage": "采集狩猎迁徙",
+                        "region": "非洲东部",
+                        "terrain": "开阔稀树草原和自然动物迁徙通道。",
+                        "weather": "干热微尘。",
+                        "lighting": "强烈自然光。",
+                        "palette": "黄褐色、暗绿色、土色。",
+                        "mood": "危险、辽阔、生存压力强。",
+                        "typical_elements": ["稀树", "枯草", "动物剪影"],
+                    },
+                }
+            ]
+        },
+    )
+    village_scenes = database.save_visual_scene_extraction(
+        "savanna-village-script",
+        {
+            "scenes": [
+                {
+                    "canonical_name": "东非稀树草原",
+                    "visual_phase_label": "农业定居村落阶段",
+                    "scene_type": "settlement_edge",
+                    "role_in_script": "同一地区进入农耕和村落定居后的空间。",
+                    "importance": 5,
+                    "visual_identity": {
+                        "era": "新石器时代",
+                        "environment_stage": "农业定居",
+                        "region": "非洲东部",
+                        "terrain": "草原边缘出现田地、围栏和土坯房。",
+                        "weather": "干热但有耕作痕迹。",
+                        "lighting": "白天柔和自然光。",
+                        "palette": "土黄、草绿、陶土色。",
+                        "mood": "定居、劳作、秩序形成。",
+                        "typical_elements": ["田地", "围栏", "土坯房", "谷物堆"],
+                    },
+                }
+            ]
+        },
+    )
+
+    pool = [scene for scene in database.list_visual_scenes() if scene["canonical_name"] == "东非稀树草原"]
+    assert len(pool) == 2
+    assert {scene["visual_phase_label"] for scene in pool} == {"采集狩猎迁徙阶段", "农业定居村落阶段"}
+    assert hunter_scenes[0]["scene_id"] != village_scenes[0]["scene_id"]
+
+
+def test_list_visual_scenes_sorted_by_pinyin(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    client.post("/api/visual/scenes/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    response = client.get("/api/visual/scenes")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    group_letters = [group["letter"] for group in payload["groups"]]
+    assert group_letters == sorted(group_letters)
+    names = [scene["canonical_name"] for scene in payload["scenes"]]
+    assert names.index("布隆伯斯洞穴") < names.index("东非稀树草原") < names.index("红海海口迁徙渡口")
+
+
+def test_script_visual_scenes_are_linked_to_generation(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    client.post("/api/visual/scenes/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    response = client.get(f"/api/script/generations/{generation['generation_id']}/visual-scenes")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["generation"]["generation_id"] == generation["generation_id"]
+    names = {scene["canonical_name"] for scene in payload["scenes"]}
+    assert "东非稀树草原" in names
+    savanna = next(scene for scene in payload["scenes"] if scene["canonical_name"] == "东非稀树草原")
+    assert savanna["role_in_script"]
+    assert savanna["first_appearance"]
+    assert savanna["is_global_scene"] is True
+
+
+def test_visual_scene_detail_contains_visual_identity(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    extraction = client.post(
+        "/api/visual/scenes/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    savanna = next(scene for scene in extraction["scenes"] if scene["canonical_name"] == "东非稀树草原")
+
+    response = client.get(f"/api/visual/scenes/{savanna['scene_id']}")
+
+    assert response.status_code == 200
+    detail = response.get_json()["scene"]
+    assert detail["visual_identity"]["terrain"]
+    assert detail["visual_identity"]["lighting"]
+    assert detail["visual_identity"]["typical_elements"]
+    assert "appearance" not in detail["visual_identity"]
+    assert detail["consistency_rules"]["must_keep"]
+    assert detail["consistency_rules"]["avoid"]
+    assert detail["negative_rules"]
+    assert detail["appearances"][0]["generation_id"] == generation["generation_id"]
+
+
+def test_visual_scene_detail_page_renders_scene_and_anchor_placeholder(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    extraction = client.post(
+        "/api/visual/scenes/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    savanna = next(scene for scene in extraction["scenes"] if scene["canonical_name"] == "东非稀树草原")
+
+    response = client.get(f"/visual/scenes/{savanna['scene_id']}")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "场景详情" in html
+    assert "东非稀树草原" in html
+    assert "视觉身份" in html
+    assert "一致性规则" in html
+    assert "出现过的剧本" in html
+    assert "场景图构建" in html
+    assert "视觉阶段" in html
+    assert "获取提示词" in html
+    assert "生成场景图" in html
+    assert "data-scene-prompt-textarea" in html
+    assert f"/api/visual/scenes/{savanna['scene_id']}/anchor-prompt" in html
+    assert f"/api/visual/scenes/{savanna['scene_id']}/anchor" in html
+    assert "ARK 场景图生成" in html
+    assert "ComfyUI 场景锚点图生成尚未配置" not in html
+
+
+def test_visual_scene_detail_updates_preview_from_generated_asset(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    extraction = client.post(
+        "/api/visual/scenes/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    savanna = next(scene for scene in extraction["scenes"] if scene["canonical_name"] == "东非稀树草原")
+
+    response = client.get(f"/visual/scenes/{savanna['scene_id']}")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert 'data-visual-scene-anchor-preview' in html
+    assert 'data-visual-scene-anchor-label' in html
+    assert 'payload.asset_url' in html
+    assert 'sceneAnchorPreview.src = imageUrl' in html
+
+
+def test_visual_scene_prompt_api_returns_environment_prompt(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    extraction = client.post(
+        "/api/visual/scenes/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    savanna = next(scene for scene in extraction["scenes"] if scene["canonical_name"] == "东非稀树草原")
+
+    response = client.get(f"/api/visual/scenes/{savanna['scene_id']}/anchor-prompt")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["scene_id"] == savanna["scene_id"]
+    assert "东非稀树草原" in payload["prompt"]
+    assert "历史科普卡通短剧" in payload["prompt"]
+    assert "只生成环境空间" in payload["prompt"]
+    assert "不要主体人物大特写" in payload["negative_prompt"]
+    assert "不要单个道具特写" in payload["negative_prompt"]
+
+
+def test_scene_anchor_generation_uses_ark_route_and_saves_asset(tmp_path):
+    provider = FakeVisualAnchorProvider()
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+        scene_provider=RuleBasedVisualSceneProvider(),
+        anchor_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    extraction = client.post(
+        "/api/visual/scenes/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    savanna = next(scene for scene in extraction["scenes"] if scene["canonical_name"] == "东非稀树草原")
+
+    response = client.post(f"/api/visual/scenes/{savanna['scene_id']}/anchor")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "completed"
+    assert payload["provider"] == "ark"
+    assert payload["model"] == "fake-seeddream"
+    assert payload["asset_url"].startswith("/outputs/visual_scene_anchors/")
+    assert (tmp_path / "outputs" / payload["asset_url"].removeprefix("/outputs/")).read_bytes() == b"fake-anchor-image"
+    assert "场景图已生成" in payload["message"]
+
+    prompt = provider.calls[0]["prompt"]
+    assert "东非稀树草原" in prompt
+    assert "只生成环境空间" in prompt
+    assert "不要主体人物大特写" in prompt
+    assert "不要单个道具特写" in provider.calls[0]["negative_prompt"]
+
+    detail = client.get(f"/api/visual/scenes/{savanna['scene_id']}").get_json()["scene"]
+    assert detail["has_anchor_asset"] is True
+    assert detail["anchor_asset_id"] == payload["asset_url"]
+    assert detail["workflow_name"] == "ark_seeddream_scene_anchor_v1"
+
+
+def test_scene_anchor_generation_accepts_edited_prompt(tmp_path):
+    provider = FakeVisualAnchorProvider()
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+        scene_provider=RuleBasedVisualSceneProvider(),
+        anchor_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    extraction = client.post(
+        "/api/visual/scenes/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    savanna = next(scene for scene in extraction["scenes"] if scene["canonical_name"] == "东非稀树草原")
+
+    response = client.post(
+        f"/api/visual/scenes/{savanna['scene_id']}/anchor",
+        json={"prompt": "用户修改后的场景图 Prompt", "negative_prompt": "不要人物"},
+    )
+
+    assert response.status_code == 200
+    assert provider.calls[0]["prompt"] == "用户修改后的场景图 Prompt"
+    assert provider.calls[0]["negative_prompt"] == "不要人物"
+    detail = client.get(f"/api/visual/scenes/{savanna['scene_id']}").get_json()["scene"]
+    assert detail["visual_prompt"] == "用户修改后的场景图 Prompt"
+    assert detail["negative_prompt"] == "不要人物"
+
+
+def test_scene_anchor_generation_reports_missing_ark_configuration(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+        scene_provider=RuleBasedVisualSceneProvider(),
+        anchor_provider=None,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    extraction = client.post(
+        "/api/visual/scenes/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    savanna = next(scene for scene in extraction["scenes"] if scene["canonical_name"] == "东非稀树草原")
+
+    response = client.post(f"/api/visual/scenes/{savanna['scene_id']}/anchor")
+
+    assert response.status_code == 500
+    assert "ARK_API_KEY" in response.get_json()["error"]
+
+
+def test_rejected_scene_candidates_are_returned(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+
+    response = client.post("/api/visual/scenes/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    assert response.status_code == 200
+    rejected = response.get_json()["rejected_candidates"]
+    assert rejected
+    assert all(candidate["name"] and candidate["reason"] for candidate in rejected)
+
+
+def test_visual_scene_api_extract_from_script(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+
+    response = client.post("/api/visual/scenes/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["generation"]["generation_id"] == generation["generation_id"]
+    assert payload["scenes"]
+    assert payload["script_scene_count"] == len(payload["scenes"])
+
+
+def test_scene_pool_renders_visual_workbench_layout(tmp_path):
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        scene_provider=RuleBasedVisualSceneProvider(),
+    )
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "visual-scene-toolbar" in html
+    assert 'data-visual-scene-mode="all">所有场景' in html
+    assert 'data-visual-scene-mode="scripts">剧本场景' in html
+    assert "sceneScriptSelect" in html
+    assert "sceneExtractButton" in html
+    assert "解析场景" in html
+    assert "scenePool" in html
+    assert "当前剧本场景" in html
+    assert 'data-scene-script-back' in html
+    assert 'id="sceneWorkbenchGrid" data-visual-current-mode="all" data-visual-script-stage="list"' in html
+    assert "用于管理东非草原、黎凡特地区、布隆伯斯洞穴" not in html
+
+
+def test_scene_pool_frontend_mirrors_subject_modes():
+    app_js = (Path(__file__).parents[1] / "drama_agents" / "webapp" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'visualSceneMode: "all"' in app_js
+    assert 'visualSceneScriptStage: "list"' in app_js
+    assert "function setVisualSceneMode" in app_js
+    assert "function setVisualSceneScriptStage" in app_js
+    assert "function showVisualSceneScriptList" in app_js
+    assert "setVisualSceneMode(\"scripts\", { scriptStage: \"subjects\" })" in app_js
+    assert "elements.sceneModeTabs" in app_js
+    assert "elements.sceneScriptBackButtons" in app_js
+
+
+def test_scene_frontend_uses_safe_json_reader_for_scene_requests():
+    app_js = (Path(__file__).parents[1] / "drama_agents" / "webapp" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "async function readJsonResponse" in app_js
+    assert 'readJsonResponse(response, "场景池加载失败")' in app_js
+    assert 'readJsonResponse(response, "场景解析失败")' in app_js
+    assert 'readJsonResponse(response, "上传解析失败")' in app_js
+    assert 'readJsonResponse(response, "剧本场景读取失败")' in app_js
+
+
+def test_subject_pool_still_works_after_scene_changes(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    scene_response = client.post("/api/visual/scenes/extract-from-script", json={"generation_id": generation["generation_id"]})
+    subject_response = client.post("/api/visual/subjects/extract-from-script", json={"generation_id": generation["generation_id"]})
+
+    assert scene_response.status_code == 200
+    assert subject_response.status_code == 200
+    subjects = client.get("/api/visual/subjects").get_json()["subjects"]
+    subject_names = {subject["canonical_name"] for subject in subjects}
+    assert "智人" in subject_names
+    detail = client.get(f"/api/visual/subjects/{subjects[0]['subject_id']}")
+    assert detail.status_code == 200
 
 
 def create_generated_script(client):

@@ -12,6 +12,16 @@ const state = {
   visualScriptStage: "list",
   visualScriptStatuses: {},
   visualScriptSubjectCounts: {},
+  visualScenes: [],
+  visualSceneGroups: [],
+  visualScriptScenes: [],
+  visualSceneRejectedCandidates: [],
+  selectedVisualSceneScriptId: "",
+  visualSceneQuery: "",
+  visualSceneMode: "all",
+  visualSceneScriptStage: "list",
+  visualSceneStatuses: {},
+  visualScriptSceneCounts: {},
   timelineSources: [],
   selectedTimelineIds: new Set(),
   selected: null,
@@ -57,6 +67,9 @@ const elements = {
   visualModeTabs: document.querySelectorAll("[data-visual-mode]"),
   visualScriptBackButtons: document.querySelectorAll("[data-visual-script-back]"),
   visualWorkbenchGrid: document.querySelector("#visualWorkbenchGrid"),
+  sceneModeTabs: document.querySelectorAll("[data-visual-scene-mode]"),
+  sceneScriptBackButtons: document.querySelectorAll("[data-scene-script-back]"),
+  sceneWorkbenchGrid: document.querySelector("#sceneWorkbenchGrid"),
   visualScriptFileInput: document.querySelector("#visualScriptFileInput"),
   visualUploadButton: document.querySelector("#visualUploadButton"),
   visualScriptSelect: document.querySelector("#visualScriptSelect"),
@@ -71,7 +84,35 @@ const elements = {
   visualSubjectPool: document.querySelector("#visualSubjectPool"),
   visualScriptSubjects: document.querySelector("#visualScriptSubjects"),
   visualRejectedCandidates: document.querySelector("#visualRejectedCandidates"),
+  sceneScriptFileInput: document.querySelector("#sceneScriptFileInput"),
+  sceneUploadButton: document.querySelector("#sceneUploadButton"),
+  sceneScriptSelect: document.querySelector("#sceneScriptSelect"),
+  sceneExtractButton: document.querySelector("#sceneExtractButton"),
+  sceneStatus: document.querySelector("#sceneStatus"),
+  sceneCurrentScript: document.querySelector("#sceneCurrentScript"),
+  refreshVisualScenesButton: document.querySelector("#refreshVisualScenesButton"),
+  refreshVisualScriptScenesButton: document.querySelector("#refreshVisualScriptScenesButton"),
+  sceneScriptList: document.querySelector("#sceneScriptList"),
+  sceneSelectedScriptTitle: document.querySelector("#sceneSelectedScriptTitle"),
+  visualSceneSearchInput: document.querySelector("#visualSceneSearchInput"),
+  scenePool: document.querySelector("#scenePool"),
+  visualScriptScenes: document.querySelector("#visualScriptScenes"),
+  visualSceneRejectedCandidates: document.querySelector("#visualSceneRejectedCandidates"),
 };
+
+async function readJsonResponse(response, fallbackMessage) {
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || fallbackMessage);
+    }
+    return payload;
+  }
+  await response.text();
+  const status = response.status ? `（HTTP ${response.status}）` : "";
+  throw new Error(`${fallbackMessage}${status}`);
+}
 
 function setActiveView(viewName) {
   elements.navTabs.forEach((tab) => {
@@ -90,8 +131,9 @@ function setActiveView(viewName) {
     });
   } else if (viewName === "scene") {
     closeTimelinePicker();
-    Promise.all([loadScriptGenerations(), loadVisualSubjects()]).catch((error) => {
+    Promise.all([loadScriptGenerations(), loadVisualSubjects(), loadVisualScenes()]).catch((error) => {
       setVisualStatus(error.message, "error");
+      setVisualSceneStatus(error.message, "error");
     });
   } else {
     closeTimelinePicker();
@@ -198,6 +240,7 @@ async function loadScriptGenerations() {
   state.scriptGenerations = payload.generations || [];
   renderScriptGenerations();
   renderVisualScriptSelect();
+  renderSceneScriptSelect();
 }
 
 function filteredRecords() {
@@ -415,6 +458,7 @@ function groupedVisualSubjectsForDisplay() {
     if (!query) return true;
     const haystack = [
       subject.canonical_name,
+      subject.visual_phase_label,
       subject.short_description,
       subject.subject_type,
       subject.pinyin_key,
@@ -537,7 +581,7 @@ function renderVisualScriptSubjectItem(subject) {
     <article class="visual-script-subject-row">
       <div class="visual-script-subject-copy">
         <strong>${escapeHtml(subject.canonical_name)}</strong>
-        <em>${escapeHtml(visualImportanceLabel(subject.importance))} · 重要度 ${escapeHtml(String(subject.importance || 0))}</em>
+        <em>${escapeHtml(subject.visual_phase_label || "默认阶段")} · ${escapeHtml(visualImportanceLabel(subject.importance))} · 重要度 ${escapeHtml(String(subject.importance || 0))}</em>
         <p>${escapeHtml(subject.role_in_script || "")}</p>
       </div>
       <a href="${visualSubjectDetailUrl(subject.subject_id)}">详情</a>
@@ -564,6 +608,7 @@ function renderVisualSubjectCard(subject) {
         <strong>${escapeHtml(subject.canonical_name || "")}</strong>
         <span>${escapeHtml(visualSubjectTypeLabel(subject.subject_type || ""))}</span>
       </div>
+      <em class="visual-phase-badge">${escapeHtml(subject.visual_phase_label || "默认阶段")}</em>
       <p>${escapeHtml(subject.short_description || "暂无描述")}</p>
       <div class="visual-subject-status-row">
         <span>${identityStatus}</span>
@@ -779,6 +824,405 @@ function renderVisualRejectedCandidates() {
     .join("");
 }
 
+async function loadVisualScenes() {
+  const response = await fetch("/api/visual/scenes");
+  const payload = await readJsonResponse(response, "场景池加载失败");
+  state.visualScenes = payload.scenes || [];
+  state.visualSceneGroups = payload.groups || [];
+  renderVisualScenePool();
+}
+
+function renderSceneScriptSelect() {
+  if (!elements.sceneScriptSelect) return;
+  if (!state.scriptGenerations.length) {
+    elements.sceneScriptSelect.innerHTML = '<option value="">暂无已有剧本</option>';
+    state.selectedVisualSceneScriptId = "";
+    updateVisualSceneCurrentScript();
+    renderVisualSceneScriptList();
+    renderVisualScriptScenes();
+    return;
+  }
+  const existingSelected = state.scriptGenerations.some(
+    (script) => script.generation_id === state.selectedVisualSceneScriptId
+  );
+  if (!existingSelected) {
+    state.selectedVisualSceneScriptId = state.scriptGenerations[0].generation_id;
+  }
+  elements.sceneScriptSelect.innerHTML = state.scriptGenerations
+    .map((script) => {
+      const selected = script.generation_id === state.selectedVisualSceneScriptId ? "selected" : "";
+      return `<option value="${escapeHtml(script.generation_id)}" ${selected}>${escapeHtml(script.script_title || script.topic || script.generation_id)}</option>`;
+    })
+    .join("");
+  updateVisualSceneCurrentScript();
+  renderVisualSceneScriptList();
+  if (state.selectedVisualSceneScriptId) {
+    loadScriptVisualScenes(state.selectedVisualSceneScriptId).catch((error) => setVisualSceneStatus(error.message, "error"));
+  }
+}
+
+function groupedVisualScenesForDisplay() {
+  const query = state.visualSceneQuery.trim().toLowerCase();
+  const filtered = state.visualScenes.filter((scene) => {
+    if (!query) return true;
+    const haystack = [
+      scene.canonical_name,
+      scene.visual_phase_label,
+      scene.short_description,
+      scene.scene_type,
+      scene.pinyin_key,
+      ...(scene.aliases || []),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(query);
+  });
+  const grouped = new Map();
+  filtered.forEach((scene) => {
+    const letter = String(scene.first_letter || "#").toUpperCase();
+    if (!grouped.has(letter)) {
+      grouped.set(letter, []);
+    }
+    grouped.get(letter).push(scene);
+  });
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([letter, scenes]) => ({
+      letter,
+      scenes: scenes.sort((left, right) =>
+        `${left.pinyin_key || ""}${left.canonical_name || ""}`.localeCompare(
+          `${right.pinyin_key || ""}${right.canonical_name || ""}`
+        )
+      ),
+    }));
+}
+
+function visualSceneStatusLabel(status) {
+  const labels = {
+    not_parsed: "未解析",
+    parsing: "解析中",
+    parsed: "已解析",
+    failed: "解析失败",
+  };
+  return labels[status] || "未解析";
+}
+
+function visualSceneParseStatus(generationId) {
+  return state.visualSceneStatuses[generationId] || "not_parsed";
+}
+
+function visualSceneTypeLabel(type) {
+  const labels = {
+    natural_environment: "自然环境",
+    settlement_camp: "聚落营地",
+    campfire_site: "篝火空间",
+    cave_site: "洞穴遗址",
+    encounter_landscape: "遭遇地带",
+    disaster_event: "灾变环境",
+    migration_crossing: "迁徙渡口",
+    migration_route: "迁徙路线",
+    ocean_edge: "海峡边界",
+    cold_camp: "寒冷营地",
+    ritual_space: "仪式空间",
+  };
+  return labels[type] || type || "未分类";
+}
+
+function visualSceneImportanceLabel(importance) {
+  const score = Number(importance || 0);
+  if (score >= 5) return "核心场景";
+  if (score >= 4) return "重点场景";
+  if (score >= 3) return "辅助场景";
+  return "低频场景";
+}
+
+function renderVisualScenePool() {
+  if (!elements.scenePool) return;
+  const groups = groupedVisualScenesForDisplay();
+  if (!state.visualScenes.length) {
+    elements.scenePool.innerHTML = `
+      <div class="visual-empty-state">
+        <strong>暂无场景</strong>
+        <span>选择剧本并点击“解析场景”后，系统会自动识别需要保持视觉一致的环境空间。</span>
+      </div>
+    `;
+    return;
+  }
+  if (!groups.length) {
+    elements.scenePool.innerHTML = `
+      <div class="visual-empty-state">
+        <strong>没有匹配的场景</strong>
+        <span>换一个关键词试试，例如东非稀树草原、布隆伯斯洞穴。</span>
+      </div>
+    `;
+    return;
+  }
+  elements.scenePool.innerHTML = groups
+    .map((group) => {
+      const cards = (group.scenes || []).map((scene) => renderVisualSceneCard(scene)).join("");
+      return `
+        <section class="visual-subject-group visual-scene-group">
+          <h3>${escapeHtml(group.letter)}</h3>
+          <div class="visual-subject-card-list visual-scene-card-list">${cards}</div>
+        </section>
+      `;
+    })
+    .join("");
+  bindVisualSceneActions(elements.scenePool);
+}
+
+function bindVisualSceneActions(root) {
+  root.querySelectorAll("[data-visual-scene-card]").forEach((card) => {
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return;
+      window.location.href = visualSceneDetailUrl(card.dataset.visualSceneCard);
+    });
+  });
+}
+
+function visualSceneDetailUrl(sceneId) {
+  return `/visual/scenes/${encodeURIComponent(sceneId || "")}`;
+}
+
+function renderVisualSceneCard(scene) {
+  const identityStatus = scene.has_visual_identity ? "已有视觉设定" : "待补视觉设定";
+  const anchorStatus = scene.has_anchor_asset ? "已生成场景锚点图" : "未生成场景锚点图";
+  return `
+    <article class="visual-subject-card visual-scene-card" data-visual-scene-card="${escapeHtml(scene.scene_id)}" tabindex="0">
+      <div class="visual-subject-card-head">
+        <strong>${escapeHtml(scene.canonical_name || "")}</strong>
+        <span>${escapeHtml(visualSceneTypeLabel(scene.scene_type || ""))}</span>
+      </div>
+      <em class="visual-phase-badge">${escapeHtml(scene.visual_phase_label || "默认阶段")}</em>
+      <p>${escapeHtml(scene.short_description || "暂无描述")}</p>
+      <div class="visual-subject-status-row">
+        <span>${identityStatus}</span>
+        <span>${anchorStatus}</span>
+        <span>${formatNumber(scene.script_count || 0)} 个剧本</span>
+      </div>
+      <a href="${visualSceneDetailUrl(scene.scene_id)}">详情</a>
+    </article>
+  `;
+}
+
+function renderVisualSceneScriptList() {
+  if (!elements.sceneScriptList) return;
+  if (!state.scriptGenerations.length) {
+    elements.sceneScriptList.innerHTML = `
+      <div class="visual-empty-state compact">
+        <strong>暂无剧本</strong>
+        <span>先在“剧本生成”里生成剧本，或从顶部上传剧本文本。</span>
+      </div>
+    `;
+    return;
+  }
+  elements.sceneScriptList.innerHTML = state.scriptGenerations
+    .map((script) => {
+      const isActive = script.generation_id === state.selectedVisualSceneScriptId;
+      const status = visualSceneParseStatus(script.generation_id);
+      const count = state.visualScriptSceneCounts[script.generation_id] || 0;
+      const label = status === "parsed" ? `已识别 ${count} 个场景` : visualSceneStatusLabel(status);
+      return `
+        <article class="visual-script-item ${isActive ? "active" : ""}">
+          <div>
+            <strong>${escapeHtml(script.script_title || script.topic || script.generation_id)}</strong>
+            <span>${escapeHtml(script.created_at || "")}</span>
+            <em data-status="${escapeHtml(status)}">${escapeHtml(label)}</em>
+          </div>
+          <button class="visual-script-open" type="button" data-visual-scene-script="${escapeHtml(script.generation_id)}">场景</button>
+        </article>
+      `;
+    })
+    .join("");
+  elements.sceneScriptList.querySelectorAll("[data-visual-scene-script]").forEach((button) => {
+    button.addEventListener("click", () => selectVisualSceneScript(button.dataset.visualSceneScript));
+  });
+}
+
+function setVisualSceneMode(mode, options = {}) {
+  const nextMode = mode === "scripts" ? "scripts" : "all";
+  state.visualSceneMode = nextMode;
+  if (nextMode === "scripts") {
+    const scriptStage = options.scriptStage || "list";
+    setVisualSceneScriptStage(scriptStage);
+  }
+  if (elements.sceneWorkbenchGrid) {
+    elements.sceneWorkbenchGrid.dataset.visualCurrentMode = nextMode;
+  }
+  elements.sceneModeTabs.forEach((tab) => {
+    const isActive = tab.dataset.visualSceneMode === nextMode;
+    tab.classList.toggle("active", isActive);
+    tab.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  renderVisualScenePool();
+  renderVisualSceneScriptList();
+  renderVisualScriptScenes();
+}
+
+function setVisualSceneScriptStage(stage) {
+  const nextStage = stage === "subjects" ? "subjects" : "list";
+  state.visualSceneScriptStage = nextStage;
+  if (elements.sceneWorkbenchGrid) {
+    elements.sceneWorkbenchGrid.dataset.visualScriptStage = nextStage;
+  }
+}
+
+function showVisualSceneScriptList() {
+  setVisualSceneMode("scripts", { scriptStage: "list" });
+}
+
+function selectVisualSceneScript(generationId) {
+  if (!generationId) return;
+  state.selectedVisualSceneScriptId = generationId;
+  elements.sceneScriptSelect.value = generationId;
+  setVisualSceneMode("scripts", { scriptStage: "subjects" });
+  updateVisualSceneCurrentScript();
+  renderVisualSceneScriptList();
+  loadScriptVisualScenes(generationId).catch((error) => setVisualSceneStatus(error.message, "error"));
+}
+
+async function extractVisualScenesFromScript() {
+  if (!state.selectedVisualSceneScriptId) {
+    setVisualSceneStatus("请先选择已有剧本。", "error");
+    return;
+  }
+  elements.sceneExtractButton.disabled = true;
+  state.visualSceneStatuses[state.selectedVisualSceneScriptId] = "parsing";
+  renderVisualSceneScriptList();
+  setVisualSceneStatus("解析中：筛选需要跨镜头保持一致的环境空间。", "loading");
+  try {
+    const response = await fetch("/api/visual/scenes/extract-from-script", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ generation_id: state.selectedVisualSceneScriptId }),
+    });
+    const payload = await readJsonResponse(response, "场景解析失败");
+    state.visualScriptScenes = payload.scenes || [];
+    state.visualSceneRejectedCandidates = payload.rejected_candidates || [];
+    state.visualSceneStatuses[state.selectedVisualSceneScriptId] = "parsed";
+    state.visualScriptSceneCounts[state.selectedVisualSceneScriptId] =
+      payload.script_scene_count || state.visualScriptScenes.length;
+    renderVisualScriptScenes(payload.generation);
+    renderVisualSceneRejectedCandidates();
+    await loadVisualScenes();
+    renderVisualSceneScriptList();
+    setVisualSceneStatus(`已解析：识别 ${payload.script_scene_count || 0} 个视觉场景。`, "success");
+  } catch (error) {
+    state.visualSceneStatuses[state.selectedVisualSceneScriptId] = "failed";
+    renderVisualSceneScriptList();
+    setVisualSceneStatus(error.message, "error");
+  } finally {
+    elements.sceneExtractButton.disabled = false;
+  }
+}
+
+async function uploadVisualSceneScript() {
+  const file = elements.sceneScriptFileInput.files[0];
+  if (!file) return;
+  const formData = new FormData();
+  formData.append("file", file);
+  elements.sceneUploadButton.disabled = true;
+  setVisualSceneStatus("正在上传剧本并解析场景...", "loading");
+  try {
+    const response = await fetch("/api/visual/scenes/extract-from-upload", { method: "POST", body: formData });
+    const payload = await readJsonResponse(response, "上传解析失败");
+    state.selectedVisualSceneScriptId = payload.generation.generation_id;
+    state.visualScriptScenes = payload.scenes || [];
+    state.visualSceneRejectedCandidates = payload.rejected_candidates || [];
+    state.visualSceneStatuses[state.selectedVisualSceneScriptId] = "parsed";
+    state.visualScriptSceneCounts[state.selectedVisualSceneScriptId] =
+      payload.script_scene_count || state.visualScriptScenes.length;
+    await loadScriptGenerations();
+    await loadVisualScenes();
+    renderVisualScriptScenes(payload.generation);
+    renderVisualSceneRejectedCandidates();
+    setVisualSceneStatus(`上传解析完成：识别 ${payload.script_scene_count || 0} 个视觉场景。`, "success");
+  } catch (error) {
+    setVisualSceneStatus(error.message, "error");
+  } finally {
+    elements.sceneScriptFileInput.value = "";
+    elements.sceneUploadButton.disabled = false;
+  }
+}
+
+async function loadScriptVisualScenes(generationId) {
+  if (!generationId) {
+    state.visualScriptScenes = [];
+    renderVisualScriptScenes();
+    return;
+  }
+  const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/visual-scenes`);
+  const payload = await readJsonResponse(response, "剧本场景读取失败");
+  state.visualScriptScenes = payload.scenes || [];
+  state.visualSceneStatuses[generationId] = payload.status || (state.visualScriptScenes.length ? "parsed" : "not_parsed");
+  state.visualScriptSceneCounts[generationId] = state.visualScriptScenes.length;
+  renderVisualSceneScriptList();
+  renderVisualScriptScenes(payload.generation);
+  renderVisualSceneRejectedCandidates();
+}
+
+function sortVisualScriptScenesByImportance(scenes) {
+  return [...scenes].sort((left, right) => {
+    const importanceGap = Number(right.importance || 0) - Number(left.importance || 0);
+    if (importanceGap !== 0) return importanceGap;
+    return `${left.pinyin_key || ""}${left.canonical_name || ""}`.localeCompare(
+      `${right.pinyin_key || ""}${right.canonical_name || ""}`
+    );
+  });
+}
+
+function renderVisualScriptSceneItem(scene) {
+  return `
+    <article class="visual-script-subject-row visual-script-scene-row">
+      <div class="visual-script-subject-copy">
+        <strong>${escapeHtml(scene.canonical_name)}</strong>
+        <em>${escapeHtml(scene.visual_phase_label || "默认阶段")} · ${escapeHtml(visualSceneImportanceLabel(scene.importance))} · 重要度 ${escapeHtml(String(scene.importance || 0))}</em>
+        <p>${escapeHtml(scene.role_in_script || "")}</p>
+        ${scene.first_appearance ? `<small>${escapeHtml(scene.first_appearance)}</small>` : ""}
+      </div>
+      <a href="${visualSceneDetailUrl(scene.scene_id)}">详情</a>
+    </article>
+  `;
+}
+
+function renderVisualScriptScenes(generation = null) {
+  if (!elements.visualScriptScenes) return;
+  const script = generation || currentVisualSceneScript();
+  if (!script) {
+    elements.visualScriptScenes.innerHTML = `
+      <div class="visual-empty-state compact">
+        <strong>未选择剧本</strong>
+        <span>从左侧选择一个剧本后查看它的场景解析结果。</span>
+      </div>
+    `;
+    return;
+  }
+  const scenes = sortVisualScriptScenesByImportance(state.visualScriptScenes || []);
+  const status = visualSceneParseStatus(script.generation_id);
+  const rows = scenes.map((scene) => renderVisualScriptSceneItem(scene)).join("");
+  elements.visualScriptScenes.innerHTML = `
+    <article class="visual-script-summary">
+      <strong>${escapeHtml(script.script_title || script.topic || "")}</strong>
+      <span>${escapeHtml(script.created_at || "")}</span>
+      <em>${escapeHtml(status === "parsed" ? `本剧本识别出 ${scenes.length} 个场景` : visualSceneStatusLabel(status))}</em>
+    </article>
+    ${rows || '<div class="visual-empty-state compact"><strong>还没有解析场景</strong><span>点击顶部“解析场景”后，这里会显示本剧本中的环境空间。</span></div>'}
+  `;
+}
+
+function renderVisualSceneRejectedCandidates() {
+  if (!elements.visualSceneRejectedCandidates) return;
+  if (!state.visualSceneRejectedCandidates.length) {
+    elements.visualSceneRejectedCandidates.innerHTML = '<span class="visual-empty-inline">暂无被拒绝候选。</span>';
+    return;
+  }
+  elements.visualSceneRejectedCandidates.innerHTML = state.visualSceneRejectedCandidates
+    .map((candidate) => {
+      return `<div class="visual-rejected-item"><strong>${escapeHtml(candidate.name)}</strong><span>${escapeHtml(candidate.reason)}</span></div>`;
+    })
+    .join("");
+}
+
 function setSceneBuilderTab(tabName) {
   const nextTab = ["subjects", "scenes", "storyboard"].includes(tabName) ? tabName : "subjects";
   elements.sceneModuleTabs.forEach((tab) => {
@@ -791,6 +1235,11 @@ function setSceneBuilderTab(tabName) {
     panel.hidden = !isActive;
     panel.classList.toggle("active", isActive);
   });
+  if (nextTab === "scenes") {
+    Promise.all([loadScriptGenerations(), loadVisualScenes()]).catch((error) => {
+      setVisualSceneStatus(error.message, "error");
+    });
+  }
 }
 
 function setVisualStatus(message, kind = "") {
@@ -803,6 +1252,10 @@ function currentVisualScript() {
   return state.scriptGenerations.find((script) => script.generation_id === state.selectedVisualScriptId) || null;
 }
 
+function currentVisualSceneScript() {
+  return state.scriptGenerations.find((script) => script.generation_id === state.selectedVisualSceneScriptId) || null;
+}
+
 function updateVisualCurrentScript() {
   if (!elements.visualCurrentScript) return;
   const script = currentVisualScript();
@@ -811,6 +1264,22 @@ function updateVisualCurrentScript() {
   if (elements.visualSelectedScriptTitle) {
     elements.visualSelectedScriptTitle.textContent = title;
   }
+}
+
+function updateVisualSceneCurrentScript() {
+  if (!elements.sceneCurrentScript) return;
+  const script = currentVisualSceneScript();
+  const title = script ? script.script_title || script.topic || script.generation_id : "未选择";
+  elements.sceneCurrentScript.textContent = `当前剧本：${title}`;
+  if (elements.sceneSelectedScriptTitle) {
+    elements.sceneSelectedScriptTitle.textContent = title;
+  }
+}
+
+function setVisualSceneStatus(message, kind = "") {
+  if (!elements.sceneStatus) return;
+  elements.sceneStatus.textContent = message;
+  elements.sceneStatus.dataset.status = kind;
 }
 
 async function parseSelectedSource() {
@@ -1398,6 +1867,12 @@ elements.visualModeTabs.forEach((tab) => {
 elements.visualScriptBackButtons.forEach((button) => {
   button.addEventListener("click", showVisualScriptList);
 });
+elements.sceneModeTabs.forEach((tab) => {
+  tab.addEventListener("click", () => setVisualSceneMode(tab.dataset.visualSceneMode));
+});
+elements.sceneScriptBackButtons.forEach((button) => {
+  button.addEventListener("click", showVisualSceneScriptList);
+});
 elements.visualUploadButton.addEventListener("click", () => elements.visualScriptFileInput.click());
 elements.visualScriptFileInput.addEventListener("change", uploadVisualScript);
 elements.visualScriptSelect.addEventListener("change", () => {
@@ -1413,6 +1888,22 @@ elements.refreshVisualSubjectsButton.addEventListener("click", () => {
 });
 elements.refreshVisualScriptSubjectsButton.addEventListener("click", () => {
   loadScriptVisualSubjects(state.selectedVisualScriptId).catch((error) => setVisualStatus(error.message, "error"));
+});
+elements.sceneUploadButton.addEventListener("click", () => elements.sceneScriptFileInput.click());
+elements.sceneScriptFileInput.addEventListener("change", uploadVisualSceneScript);
+elements.sceneScriptSelect.addEventListener("change", () => {
+  selectVisualSceneScript(elements.sceneScriptSelect.value);
+});
+elements.visualSceneSearchInput.addEventListener("input", () => {
+  state.visualSceneQuery = elements.visualSceneSearchInput.value;
+  renderVisualScenePool();
+});
+elements.sceneExtractButton.addEventListener("click", extractVisualScenesFromScript);
+elements.refreshVisualScenesButton.addEventListener("click", () => {
+  loadVisualScenes().catch((error) => setVisualSceneStatus(error.message, "error"));
+});
+elements.refreshVisualScriptScenesButton.addEventListener("click", () => {
+  loadScriptVisualScenes(state.selectedVisualSceneScriptId).catch((error) => setVisualSceneStatus(error.message, "error"));
 });
 document.addEventListener("click", (event) => {
   if (!elements.timelinePicker.contains(event.target) && !elements.timelinePopover.hidden) {

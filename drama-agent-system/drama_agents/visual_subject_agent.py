@@ -230,9 +230,10 @@ def normalize_extraction_payload(payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(item, dict):
             continue
         normalized = normalize_visual_subject_payload(item)
-        if not normalized["canonical_name"] or normalized["canonical_name"] in seen:
+        identity_key = f"{normalized['canonical_name']}::{normalized['visual_phase_key']}"
+        if not normalized["canonical_name"] or identity_key in seen:
             continue
-        seen.add(normalized["canonical_name"])
+        seen.add(identity_key)
         subjects.append(normalized)
     rejected_candidates = []
     for candidate in raw_rejected or []:
@@ -373,6 +374,12 @@ def build_visual_subject_prompt(payload: dict[str, Any]) -> str:
 - 智人、早期智人、现代智人的祖先、现代人类的祖先应合并为 canonical_name = 智人。
 - 智人、尼安德特人、直立人、丹尼索瓦人必须保持独立主体。
 
+阶段复用规则：
+- 发现同名主体时，先判断它是不是同一个视觉阶段。如果外观、服饰、工具、生活方式、社会形态都一致，说明能复用已有主体阶段。
+- 如果同名主体处在不同阶段，不要强行合并，要拆成多个主体阶段，并分别输出。例如智人可拆为“采集狩猎阶段”“农业定居阶段”“现代阶段”。
+- visual_phase_label 必须写清楚阶段，优先用生活方式或历史阶段命名，而不是只写“阶段1”。
+- 同名主体的不同阶段可以有相同 canonical_name，但必须有不同 visual_phase_label。
+
 输出严格 JSON object：
 {{
   "subjects": [
@@ -380,6 +387,7 @@ def build_visual_subject_prompt(payload: dict[str, Any]) -> str:
       "canonical_name": "智人",
       "aliases": ["早期智人", "现代人类的祖先"],
       "subject_type": "species",
+      "visual_phase_label": "采集狩猎阶段",
       "role_in_script": "本集核心主角...",
       "importance": 5,
       "first_appearance": "首次出现片段",
@@ -389,6 +397,7 @@ def build_visual_subject_prompt(payload: dict[str, Any]) -> str:
       "visual_identity": {{
         "era": "时代",
         "region": "地区",
+        "lifestyle_stage": "生活方式阶段",
         "appearance": "外观",
         "clothing": "服饰",
         "props": ["可稳定携带的标志性道具"],

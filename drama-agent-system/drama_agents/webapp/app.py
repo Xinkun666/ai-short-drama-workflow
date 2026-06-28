@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, render_template, request, send_file, send_from_directory
+from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 from drama_agents.chapter_refiner import ChapterRefiner, result_to_payload as refinement_result_to_payload
@@ -15,11 +16,13 @@ from drama_agents.map_api import REGIONS, clamp_int, ensure_default_data, parse_
 from drama_agents.material_splitter import MaterialSplitter, SUPPORTED_MATERIAL_EXTENSIONS, slugify
 from drama_agents.script_agent import ScriptAgent, render_script_markdown
 from drama_agents.script_assistant import ScriptAssistantController
-from drama_agents.storage import MaterialDatabase
+from drama_agents.storage import MaterialDatabase, group_visual_scenes
 from drama_agents.timeline_builder import TimelineBuilder, result_to_payload as timeline_result_to_payload
 from drama_agents.vector_store import LocalVectorStore, build_material_chunks
 from drama_agents.visual_anchor_agent import VisualAnchorAgent
 from drama_agents.visual_anchor_agent import build_subject_anchor_negative_prompt, build_subject_anchor_prompt
+from drama_agents.visual_scene_agent import VisualSceneAgent
+from drama_agents.visual_scene_agent import build_scene_anchor_negative_prompt, build_scene_anchor_prompt
 from drama_agents.visual_subject_agent import VisualSubjectAgent
 
 
@@ -34,6 +37,7 @@ def create_app(
     timeline_provider=ENV_PROVIDER,
     script_provider=ENV_PROVIDER,
     subject_provider=ENV_PROVIDER,
+    scene_provider=ENV_PROVIDER,
     anchor_provider=ENV_PROVIDER,
 ) -> Flask:
     package_dir = Path(__file__).parent
@@ -50,6 +54,7 @@ def create_app(
     map_data_path = package_dir.parents[1] / "data" / "natural_earth"
     map_outputs_path = outputs_path / "maps"
     visual_anchor_outputs_path = outputs_path / "visual_subject_anchors"
+    visual_scene_anchor_outputs_path = outputs_path / "visual_scene_anchors"
     records_path = outputs_path / "material_records.json"
     database_path = outputs_path / "material_workstation.sqlite3"
     rag_database_path = outputs_path / "material_rag.sqlite3"
@@ -64,6 +69,11 @@ def create_app(
         if subject_provider is ENV_PROVIDER
         else VisualSubjectAgent(subject_provider)
     )
+    visual_scene_agent = (
+        VisualSceneAgent.from_environment()
+        if scene_provider is ENV_PROVIDER
+        else VisualSceneAgent(scene_provider)
+    )
     visual_anchor_agent = (
         VisualAnchorAgent.from_environment()
         if anchor_provider is ENV_PROVIDER
@@ -74,6 +84,7 @@ def create_app(
     script_outputs_path.mkdir(parents=True, exist_ok=True)
     map_outputs_path.mkdir(parents=True, exist_ok=True)
     visual_anchor_outputs_path.mkdir(parents=True, exist_ok=True)
+    visual_scene_anchor_outputs_path.mkdir(parents=True, exist_ok=True)
 
     app.config["WORKSPACE"] = workspace_path
     app.config["OUTPUTS"] = outputs_path
@@ -83,11 +94,19 @@ def create_app(
     app.config["MAP_DATA"] = map_data_path
     app.config["MAP_OUTPUTS"] = map_outputs_path
     app.config["VISUAL_ANCHOR_OUTPUTS"] = visual_anchor_outputs_path
+    app.config["VISUAL_SCENE_ANCHOR_OUTPUTS"] = visual_scene_anchor_outputs_path
     app.config["MATERIAL_RECORDS"] = records_path
     app.config["MATERIAL_DATABASE"] = database_path
     app.config["RAG_DATABASE"] = rag_database_path
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
     migrate_legacy_records(database, records_path, outputs_path)
+
+    @app.errorhandler(HTTPException)
+    def handle_http_exception(error: HTTPException):
+        if request.path.startswith("/api/"):
+            message = "资源不存在" if error.code == 404 else error.description or error.name
+            return jsonify({"error": message, "status": error.code}), error.code
+        return error
 
     @app.route("/", methods=["GET"])
     def index():
@@ -385,6 +404,140 @@ def create_app(
             }
         )
 
+    @app.route("/api/visual/scenes/extract-from-script", methods=["POST"])
+    def extract_visual_scenes_from_script():
+        payload = request.get_json(silent=True) or {}
+        generation_id = str(payload.get("generation_id") or "").strip()
+        if not generation_id:
+            return jsonify({"error": "缺少剧本 generation_id"}), 400
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        try:
+            extraction = visual_scene_agent.extract(generation)
+            scenes = database.save_visual_scene_extraction(generation_id, extraction)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify(
+            {
+                "generation": generation,
+                "scenes": scenes,
+                "script_scene_count": len(scenes),
+                "rejected_candidates": extraction.get("rejected_candidates", []),
+            }
+        )
+
+    @app.route("/api/visual/scenes/extract-from-upload", methods=["POST"])
+    def extract_visual_scenes_from_upload():
+        file = request.files.get("file")
+        if not file or not file.filename:
+            return jsonify({"error": "没有收到上传剧本"}), 400
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown", ".json"}:
+            return jsonify({"error": "暂只支持 TXT / MD / JSON 剧本文件"}), 400
+        filename = secure_filename(file.filename) or f"script{suffix}"
+        destination = unique_path(upload_path / filename)
+        file.save(destination)
+        try:
+            text = destination.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return jsonify({"error": "剧本文件需要是 UTF-8 文本"}), 400
+        generation = script_generation_from_uploaded_text(destination, text)
+        database = MaterialDatabase(database_path)
+        database.save_script_generation(generation)
+        extraction = visual_scene_agent.extract(generation)
+        scenes = database.save_visual_scene_extraction(generation["generation_id"], extraction)
+        return jsonify(
+            {
+                "generation": database.find_script_generation(generation["generation_id"]) or generation,
+                "scenes": scenes,
+                "script_scene_count": len(scenes),
+                "rejected_candidates": extraction.get("rejected_candidates", []),
+            }
+        )
+
+    @app.route("/api/visual/scenes", methods=["GET"])
+    def list_visual_scenes():
+        scenes = MaterialDatabase(database_path).list_visual_scenes()
+        return jsonify({"scenes": scenes, "groups": group_visual_scenes(scenes)})
+
+    @app.route("/api/visual/scenes/<scene_id>", methods=["GET", "PATCH"])
+    def visual_scene_detail(scene_id: str):
+        database = MaterialDatabase(database_path)
+        if request.method == "PATCH":
+            payload = request.get_json(silent=True) or {}
+            try:
+                scene = database.update_visual_scene(scene_id, payload)
+            except KeyError:
+                abort(404)
+            return jsonify({"scene": scene})
+        scene = database.find_visual_scene(scene_id)
+        if not scene:
+            abort(404)
+        return jsonify({"scene": scene})
+
+    @app.route("/visual/scenes/<scene_id>", methods=["GET"])
+    def visual_scene_detail_page(scene_id: str):
+        database = MaterialDatabase(database_path)
+        scene = database.find_visual_scene(scene_id)
+        if not scene:
+            abort(404)
+        return render_template("visual_scene_detail.html", scene=scene)
+
+    @app.route("/api/visual/scenes/<scene_id>/anchor-prompt", methods=["GET"])
+    def visual_scene_anchor_prompt(scene_id: str):
+        database = MaterialDatabase(database_path)
+        scene = database.find_visual_scene(scene_id)
+        if not scene:
+            abort(404)
+        return jsonify(
+            {
+                "scene_id": scene_id,
+                "prompt": build_scene_anchor_prompt(scene),
+                "negative_prompt": build_scene_anchor_negative_prompt(scene),
+            }
+        )
+
+    @app.route("/api/visual/scenes/<scene_id>/anchor", methods=["POST"])
+    def create_visual_scene_anchor(scene_id: str):
+        database = MaterialDatabase(database_path)
+        scene = database.find_visual_scene(scene_id)
+        if not scene:
+            abort(404)
+        payload = request.get_json(silent=True) or {}
+        try:
+            anchor = visual_anchor_agent.generate_scene_anchor(
+                scene=scene,
+                output_dir=visual_scene_anchor_outputs_path,
+                prompt=payload.get("prompt"),
+                negative_prompt=payload.get("negative_prompt") if "negative_prompt" in payload else None,
+            )
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        asset_url = output_link(Path(anchor["asset_path"]), outputs_path)
+        scene = database.update_visual_scene(
+            scene_id,
+            {
+                "anchor_asset_id": asset_url,
+                "visual_prompt": anchor["prompt"],
+                "negative_prompt": anchor["negative_prompt"],
+                "workflow_name": anchor["workflow_name"],
+                "status": "anchor_ready",
+            },
+        )
+        return jsonify(
+            {
+                "scene_id": scene_id,
+                "status": "completed",
+                "provider": anchor["provider"],
+                "model": anchor["model"],
+                "asset_url": asset_url,
+                "scene": scene,
+                "message": "场景图已生成，并已写入场景资产记录。",
+            }
+        )
+
     @app.route("/api/script/generations/<generation_id>/visual-subjects", methods=["GET"])
     def list_generation_visual_subjects(generation_id: str):
         database = MaterialDatabase(database_path)
@@ -398,6 +551,22 @@ def create_app(
                 "subjects": subjects,
                 "subject_count": len(subjects),
                 "status": "parsed" if subjects else "not_parsed",
+            }
+        )
+
+    @app.route("/api/script/generations/<generation_id>/visual-scenes", methods=["GET"])
+    def list_generation_visual_scenes(generation_id: str):
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        scenes = database.list_script_visual_scenes(generation_id)
+        return jsonify(
+            {
+                "generation": generation,
+                "scenes": scenes,
+                "scene_count": len(scenes),
+                "status": "parsed" if scenes else "not_parsed",
             }
         )
 

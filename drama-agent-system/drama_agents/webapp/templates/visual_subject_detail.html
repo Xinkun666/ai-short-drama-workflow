@@ -17,6 +17,7 @@
         </div>
         <div class="script-page-meta">
           <span>{{ subject.subject_type }}</span>
+          <span>{{ subject.visual_phase_label }}</span>
           <span>{% if subject.has_anchor_asset %}已生成锚点图{% else %}未生成锚点图{% endif %}</span>
         </div>
       </header>
@@ -32,6 +33,7 @@
           <dl class="visual-detail-grid">
             <div><dt>名称</dt><dd>{{ subject.canonical_name }}</dd></div>
             <div><dt>类型</dt><dd>{{ subject.subject_type }}</dd></div>
+            <div><dt>视觉阶段</dt><dd>{{ subject.visual_phase_label }}</dd></div>
             <div><dt>拼音排序 key</dt><dd>{{ subject.pinyin_key }}</dd></div>
             <div><dt>描述</dt><dd>{{ subject.short_description }}</dd></div>
           </dl>
@@ -43,6 +45,7 @@
           <dl class="visual-detail-list">
             <div><dt>时代</dt><dd>{{ identity.era or "" }}</dd></div>
             <div><dt>地区</dt><dd>{{ identity.region or "" }}</dd></div>
+            <div><dt>生活阶段</dt><dd>{{ identity.lifestyle_stage or subject.visual_phase_label or "" }}</dd></div>
             <div><dt>外观</dt><dd>{{ identity.appearance or "" }}</dd></div>
             <div><dt>服饰</dt><dd>{{ identity.clothing or "" }}</dd></div>
             <div><dt>道具</dt><dd>{{ (identity.props or [])|join("、") }}</dd></div>

@@ -204,6 +204,8 @@ class MaterialDatabase:
                 CREATE TABLE IF NOT EXISTS visual_subjects (
                     subject_id TEXT PRIMARY KEY,
                     canonical_name TEXT NOT NULL,
+                    visual_phase_key TEXT NOT NULL DEFAULT 'default',
+                    visual_phase_label TEXT NOT NULL DEFAULT '默认阶段',
                     pinyin_key TEXT NOT NULL DEFAULT '',
                     first_letter TEXT NOT NULL DEFAULT '',
                     subject_type TEXT NOT NULL DEFAULT '',
@@ -234,6 +236,41 @@ class MaterialDatabase:
                     FOREIGN KEY (subject_id) REFERENCES visual_subjects(subject_id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS visual_scenes (
+                    scene_id TEXT PRIMARY KEY,
+                    canonical_name TEXT NOT NULL,
+                    visual_phase_key TEXT NOT NULL DEFAULT 'default',
+                    visual_phase_label TEXT NOT NULL DEFAULT '默认阶段',
+                    pinyin_key TEXT NOT NULL DEFAULT '',
+                    first_letter TEXT NOT NULL DEFAULT '',
+                    scene_type TEXT NOT NULL DEFAULT '',
+                    short_description TEXT NOT NULL DEFAULT '',
+                    visual_identity_json TEXT NOT NULL DEFAULT '{}',
+                    consistency_rules_json TEXT NOT NULL DEFAULT '{}',
+                    negative_rules_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    anchor_asset_id TEXT NOT NULL DEFAULT '',
+                    visual_prompt TEXT NOT NULL DEFAULT '',
+                    negative_prompt TEXT NOT NULL DEFAULT '',
+                    workflow_name TEXT NOT NULL DEFAULT '',
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS script_visual_scenes (
+                    generation_id TEXT NOT NULL,
+                    scene_id TEXT NOT NULL,
+                    role_in_script TEXT NOT NULL DEFAULT '',
+                    importance INTEGER NOT NULL DEFAULT 0,
+                    first_appearance TEXT NOT NULL DEFAULT '',
+                    evidence_text TEXT NOT NULL DEFAULT '',
+                    extraction_confidence TEXT NOT NULL DEFAULT '',
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    PRIMARY KEY(generation_id, scene_id),
+                    FOREIGN KEY (scene_id) REFERENCES visual_scenes(scene_id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_material_chapters_record
                     ON material_chapters(record_id, chapter_id);
                 CREATE INDEX IF NOT EXISTS idx_timeline_events_record
@@ -246,12 +283,14 @@ class MaterialDatabase:
                     ON script_assistant_conversations(generation_id, is_archived, updated_at);
                 CREATE INDEX IF NOT EXISTS idx_script_edit_patches_generation
                     ON script_edit_patches(generation_id, status, created_at);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_subjects_canonical
-                    ON visual_subjects(canonical_name);
                 CREATE INDEX IF NOT EXISTS idx_visual_subjects_sort
                     ON visual_subjects(first_letter, pinyin_key, canonical_name);
                 CREATE INDEX IF NOT EXISTS idx_script_visual_subjects_generation
                     ON script_visual_subjects(generation_id, importance DESC, subject_id);
+                CREATE INDEX IF NOT EXISTS idx_visual_scenes_sort
+                    ON visual_scenes(first_letter, pinyin_key, canonical_name);
+                CREATE INDEX IF NOT EXISTS idx_script_visual_scenes_generation
+                    ON script_visual_scenes(generation_id, importance DESC, scene_id);
                 """
             )
             ensure_table_columns(
@@ -305,11 +344,40 @@ class MaterialDatabase:
                 connection,
                 "visual_subjects",
                 {
+                    "visual_phase_key": "TEXT NOT NULL DEFAULT 'default'",
+                    "visual_phase_label": "TEXT NOT NULL DEFAULT '默认阶段'",
                     "visual_prompt": "TEXT NOT NULL DEFAULT ''",
                     "negative_prompt": "TEXT NOT NULL DEFAULT ''",
                     "workflow_name": "TEXT NOT NULL DEFAULT ''",
                     "raw_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
+            )
+            ensure_table_columns(
+                connection,
+                "visual_scenes",
+                {
+                    "visual_phase_key": "TEXT NOT NULL DEFAULT 'default'",
+                    "visual_phase_label": "TEXT NOT NULL DEFAULT '默认阶段'",
+                    "visual_prompt": "TEXT NOT NULL DEFAULT ''",
+                    "negative_prompt": "TEXT NOT NULL DEFAULT ''",
+                    "workflow_name": "TEXT NOT NULL DEFAULT ''",
+                    "raw_json": "TEXT NOT NULL DEFAULT '{}'",
+                },
+            )
+            backfill_visual_phase_metadata(connection)
+            connection.execute("DROP INDEX IF EXISTS idx_visual_subjects_canonical")
+            connection.execute("DROP INDEX IF EXISTS idx_visual_scenes_canonical")
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_subjects_identity
+                    ON visual_subjects(canonical_name, visual_phase_key)
+                """
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_visual_scenes_identity
+                    ON visual_scenes(canonical_name, visual_phase_key)
+                """
             )
             self.ensure_legacy_script_assistant_conversations(connection)
 
@@ -579,21 +647,28 @@ class MaterialDatabase:
             connection.execute("DELETE FROM script_visual_subjects WHERE generation_id = ?", (generation_id,))
             for subject in subjects:
                 existing = connection.execute(
-                    "SELECT subject_id FROM visual_subjects WHERE canonical_name = ?",
-                    (subject["canonical_name"],),
+                    """
+                    SELECT subject_id
+                    FROM visual_subjects
+                    WHERE canonical_name = ? AND visual_phase_key = ?
+                    """,
+                    (subject["canonical_name"], subject["visual_phase_key"]),
                 ).fetchone()
                 if existing:
                     subject["subject_id"] = existing["subject_id"]
                 connection.execute(
                     """
                     INSERT INTO visual_subjects (
-                        subject_id, canonical_name, pinyin_key, first_letter, subject_type,
+                        subject_id, canonical_name, visual_phase_key, visual_phase_label,
+                        pinyin_key, first_letter, subject_type,
                         short_description, visual_identity_json, consistency_rules_json,
                         negative_rules_json, status, anchor_asset_id, visual_prompt,
                         negative_prompt, workflow_name, raw_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT(subject_id) DO UPDATE SET
                         canonical_name=excluded.canonical_name,
+                        visual_phase_key=excluded.visual_phase_key,
+                        visual_phase_label=excluded.visual_phase_label,
                         pinyin_key=excluded.pinyin_key,
                         first_letter=excluded.first_letter,
                         subject_type=excluded.subject_type,
@@ -712,6 +787,8 @@ class MaterialDatabase:
         merged = dict(current)
         for key in (
             "canonical_name",
+            "visual_phase_key",
+            "visual_phase_label",
             "subject_type",
             "short_description",
             "visual_identity",
@@ -732,6 +809,8 @@ class MaterialDatabase:
                 """
                 UPDATE visual_subjects
                 SET canonical_name = ?,
+                    visual_phase_key = ?,
+                    visual_phase_label = ?,
                     pinyin_key = ?,
                     first_letter = ?,
                     subject_type = ?,
@@ -754,6 +833,206 @@ class MaterialDatabase:
         if not subject:
             raise KeyError(subject_id)
         return subject
+
+    def save_visual_scene_extraction(
+        self,
+        generation_id: str,
+        extraction: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not self.find_script_generation(generation_id):
+            raise KeyError(generation_id)
+        raw_scenes = extraction.get("scenes") if isinstance(extraction, dict) else []
+        scenes = [normalize_visual_scene_payload(scene) for scene in raw_scenes or [] if isinstance(scene, dict)]
+        with self.connect() as connection:
+            connection.execute("DELETE FROM script_visual_scenes WHERE generation_id = ?", (generation_id,))
+            for scene in scenes:
+                existing = connection.execute(
+                    """
+                    SELECT scene_id
+                    FROM visual_scenes
+                    WHERE canonical_name = ? AND visual_phase_key = ?
+                    """,
+                    (scene["canonical_name"], scene["visual_phase_key"]),
+                ).fetchone()
+                if existing:
+                    scene["scene_id"] = existing["scene_id"]
+                connection.execute(
+                    """
+                    INSERT INTO visual_scenes (
+                        scene_id, canonical_name, visual_phase_key, visual_phase_label,
+                        pinyin_key, first_letter, scene_type,
+                        short_description, visual_identity_json, consistency_rules_json,
+                        negative_rules_json, status, anchor_asset_id, visual_prompt,
+                        negative_prompt, workflow_name, raw_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ON CONFLICT(scene_id) DO UPDATE SET
+                        canonical_name=excluded.canonical_name,
+                        visual_phase_key=excluded.visual_phase_key,
+                        visual_phase_label=excluded.visual_phase_label,
+                        pinyin_key=excluded.pinyin_key,
+                        first_letter=excluded.first_letter,
+                        scene_type=excluded.scene_type,
+                        short_description=excluded.short_description,
+                        visual_identity_json=excluded.visual_identity_json,
+                        consistency_rules_json=excluded.consistency_rules_json,
+                        negative_rules_json=excluded.negative_rules_json,
+                        status=excluded.status,
+                        anchor_asset_id=excluded.anchor_asset_id,
+                        visual_prompt=excluded.visual_prompt,
+                        negative_prompt=excluded.negative_prompt,
+                        workflow_name=excluded.workflow_name,
+                        raw_json=excluded.raw_json,
+                        updated_at=CURRENT_TIMESTAMP
+                    """,
+                    visual_scene_values(scene),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO script_visual_scenes (
+                        generation_id, scene_id, role_in_script, importance,
+                        first_appearance, evidence_text, extraction_confidence, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(generation_id, scene_id) DO UPDATE SET
+                        role_in_script=excluded.role_in_script,
+                        importance=excluded.importance,
+                        first_appearance=excluded.first_appearance,
+                        evidence_text=excluded.evidence_text,
+                        extraction_confidence=excluded.extraction_confidence,
+                        raw_json=excluded.raw_json
+                    """,
+                    script_visual_scene_values(generation_id, scene),
+                )
+        return self.list_script_visual_scenes(generation_id)
+
+    def list_visual_scenes(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    visual_scenes.*,
+                    COUNT(DISTINCT script_visual_scenes.generation_id) AS script_count
+                FROM visual_scenes
+                LEFT JOIN script_visual_scenes
+                    ON script_visual_scenes.scene_id = visual_scenes.scene_id
+                GROUP BY visual_scenes.scene_id
+                ORDER BY visual_scenes.first_letter, visual_scenes.pinyin_key, visual_scenes.canonical_name
+                """
+            ).fetchall()
+        return [visual_scene_from_row(row) for row in rows]
+
+    def find_visual_scene(self, scene_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    visual_scenes.*,
+                    COUNT(DISTINCT script_visual_scenes.generation_id) AS script_count
+                FROM visual_scenes
+                LEFT JOIN script_visual_scenes
+                    ON script_visual_scenes.scene_id = visual_scenes.scene_id
+                WHERE visual_scenes.scene_id = ?
+                GROUP BY visual_scenes.scene_id
+                """,
+                (scene_id,),
+            ).fetchone()
+            if not row:
+                return None
+            appearances = connection.execute(
+                """
+                SELECT
+                    script_visual_scenes.*,
+                    script_generations.topic,
+                    script_generations.created_at,
+                    script_generations.time_range
+                FROM script_visual_scenes
+                LEFT JOIN script_generations
+                    ON script_generations.generation_id = script_visual_scenes.generation_id
+                WHERE script_visual_scenes.scene_id = ?
+                ORDER BY script_generations.created_at DESC, script_visual_scenes.importance DESC
+                """,
+                (scene_id,),
+            ).fetchall()
+        scene = visual_scene_from_row(row)
+        scene["appearances"] = [visual_scene_appearance_from_row(appearance) for appearance in appearances]
+        return scene
+
+    def list_script_visual_scenes(self, generation_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    script_visual_scenes.generation_id,
+                    script_visual_scenes.role_in_script,
+                    script_visual_scenes.importance,
+                    script_visual_scenes.first_appearance,
+                    script_visual_scenes.evidence_text,
+                    script_visual_scenes.extraction_confidence,
+                    script_visual_scenes.raw_json AS script_scene_raw_json,
+                    visual_scenes.*,
+                    1 AS script_count
+                FROM script_visual_scenes
+                JOIN visual_scenes
+                    ON visual_scenes.scene_id = script_visual_scenes.scene_id
+                WHERE script_visual_scenes.generation_id = ?
+                ORDER BY script_visual_scenes.importance DESC, visual_scenes.pinyin_key
+                """,
+                (generation_id,),
+            ).fetchall()
+        return [script_visual_scene_from_row(row) for row in rows]
+
+    def update_visual_scene(self, scene_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+        current = self.find_visual_scene(scene_id)
+        if not current:
+            raise KeyError(scene_id)
+        merged = dict(current)
+        for key in (
+            "canonical_name",
+            "visual_phase_key",
+            "visual_phase_label",
+            "scene_type",
+            "short_description",
+            "visual_identity",
+            "consistency_rules",
+            "negative_rules",
+            "status",
+            "anchor_asset_id",
+            "visual_prompt",
+            "negative_prompt",
+            "workflow_name",
+        ):
+            if key in updates:
+                merged[key] = updates[key]
+        normalized = normalize_visual_scene_payload(merged)
+        normalized["scene_id"] = scene_id
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE visual_scenes
+                SET canonical_name = ?,
+                    visual_phase_key = ?,
+                    visual_phase_label = ?,
+                    pinyin_key = ?,
+                    first_letter = ?,
+                    scene_type = ?,
+                    short_description = ?,
+                    visual_identity_json = ?,
+                    consistency_rules_json = ?,
+                    negative_rules_json = ?,
+                    status = ?,
+                    anchor_asset_id = ?,
+                    visual_prompt = ?,
+                    negative_prompt = ?,
+                    workflow_name = ?,
+                    raw_json = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE scene_id = ?
+                """,
+                (*visual_scene_values(normalized)[1:], scene_id),
+            )
+        scene = self.find_visual_scene(scene_id)
+        if not scene:
+            raise KeyError(scene_id)
+        return scene
 
     def ensure_legacy_script_assistant_conversations(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute(
@@ -1566,6 +1845,7 @@ def normalize_visual_subject_payload(subject: dict[str, Any]) -> dict[str, Any]:
     visual_identity = subject.get("visual_identity")
     if not isinstance(visual_identity, dict):
         visual_identity = {}
+    phase_key, phase_label = visual_subject_phase_identity(subject, visual_identity)
     consistency_rules = subject.get("consistency_rules")
     if not isinstance(consistency_rules, dict):
         consistency_rules = {}
@@ -1586,8 +1866,10 @@ def normalize_visual_subject_payload(subject: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(subject)
     normalized.update(
         {
-            "subject_id": str(subject.get("subject_id") or stable_visual_subject_id(canonical_name)),
+            "subject_id": str(subject.get("subject_id") or stable_visual_subject_id(canonical_name, phase_key)),
             "canonical_name": canonical_name,
+            "visual_phase_key": phase_key,
+            "visual_phase_label": phase_label,
             "pinyin_key": pinyin_key,
             "first_letter": first_letter,
             "subject_type": subject_type,
@@ -1617,6 +1899,8 @@ def visual_subject_values(subject: dict[str, Any]) -> tuple[Any, ...]:
     return (
         subject["subject_id"],
         subject["canonical_name"],
+        subject["visual_phase_key"],
+        subject["visual_phase_label"],
         subject["pinyin_key"],
         subject["first_letter"],
         subject["subject_type"],
@@ -1656,6 +1940,8 @@ def visual_subject_from_row(row: sqlite3.Row) -> dict[str, Any]:
         {
             "subject_id": row["subject_id"],
             "canonical_name": row["canonical_name"],
+            "visual_phase_key": row["visual_phase_key"],
+            "visual_phase_label": row["visual_phase_label"],
             "pinyin_key": row["pinyin_key"],
             "first_letter": row["first_letter"],
             "subject_type": row["subject_type"],
@@ -1711,8 +1997,435 @@ def visual_subject_appearance_from_row(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def stable_visual_subject_id(canonical_name: str) -> str:
-    digest = hashlib.sha1(canonical_name.encode("utf-8")).hexdigest()[:12]
+DEFAULT_VISUAL_PHASE_KEY = "default"
+DEFAULT_VISUAL_PHASE_LABEL = "默认阶段"
+
+
+def visual_subject_phase_identity(subject: dict[str, Any], visual_identity: dict[str, Any]) -> tuple[str, str]:
+    label = first_phase_label(
+        subject,
+        visual_identity,
+        "visual_phase_label",
+        "phase_label",
+        "stage_label",
+        "visual_phase",
+        "lifestyle_stage",
+        "era_stage",
+    )
+    phase_text = phase_evidence_text(
+        subject,
+        visual_identity,
+        [
+            "role_in_script",
+            "short_description",
+            "description",
+            "why_consistency_needed",
+            "visual_phase_label",
+            "phase_label",
+            "stage_label",
+            "visual_phase",
+        ],
+        [
+            "era",
+            "region",
+            "appearance",
+            "clothing",
+            "props",
+            "body_language",
+            "group_composition",
+            "lifestyle_stage",
+            "era_stage",
+        ],
+    )
+    if not label:
+        label = infer_visual_phase_label(phase_text)
+    return visual_phase_key(subject, label, phase_text), label
+
+
+def visual_scene_phase_identity(scene: dict[str, Any], visual_identity: dict[str, Any]) -> tuple[str, str]:
+    label = first_phase_label(
+        scene,
+        visual_identity,
+        "visual_phase_label",
+        "phase_label",
+        "stage_label",
+        "visual_phase",
+        "environment_stage",
+        "lifestyle_stage",
+        "civilization_stage",
+        "era_stage",
+    )
+    phase_text = phase_evidence_text(
+        scene,
+        visual_identity,
+        [
+            "role_in_script",
+            "short_description",
+            "description",
+            "why_consistency_needed",
+            "visual_phase_label",
+            "phase_label",
+            "stage_label",
+            "visual_phase",
+        ],
+        [
+            "era",
+            "region",
+            "terrain",
+            "weather",
+            "lighting",
+            "palette",
+            "mood",
+            "typical_elements",
+            "environment_stage",
+            "lifestyle_stage",
+            "civilization_stage",
+            "era_stage",
+        ],
+    )
+    if not label:
+        label = infer_visual_phase_label(phase_text)
+    return visual_phase_key(scene, label, phase_text), label
+
+
+def first_phase_label(item: dict[str, Any], visual_identity: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = item.get(key)
+        if not value and isinstance(visual_identity, dict):
+            value = visual_identity.get(key)
+        text = str(value or "").strip()
+        if text and text not in {DEFAULT_VISUAL_PHASE_KEY, DEFAULT_VISUAL_PHASE_LABEL}:
+            return text
+    return ""
+
+
+def phase_evidence_text(
+    item: dict[str, Any],
+    visual_identity: dict[str, Any],
+    item_keys: list[str],
+    identity_keys: list[str],
+) -> str:
+    values: list[str] = []
+    for key in item_keys:
+        append_phase_value(values, item.get(key))
+    for key in identity_keys:
+        append_phase_value(values, visual_identity.get(key) if isinstance(visual_identity, dict) else None)
+    return " ".join(values)
+
+
+def append_phase_value(values: list[str], value: Any) -> None:
+    if isinstance(value, list):
+        values.extend(str(item).strip() for item in value if str(item).strip())
+    elif isinstance(value, dict):
+        values.extend(str(item).strip() for item in value.values() if str(item).strip())
+    else:
+        text = str(value or "").strip()
+        if text:
+            values.append(text)
+
+
+def infer_visual_phase_label(text: str) -> str:
+    compact = str(text or "")
+    if has_any(compact, ["现代", "都市", "城市人", "西装", "牛仔", "汽车", "高楼"]):
+        return "现代阶段"
+    if has_any(compact, ["农业", "农耕", "定居", "村落", "播种", "收割", "谷物", "陶罐", "田地"]):
+        return "农业定居阶段"
+    if has_any(compact, ["采集", "狩猎", "迁徙", "旧石器", "兽皮", "石器", "木矛", "游动部落"]):
+        return "采集狩猎阶段"
+    if has_any(compact, ["冰河", "严寒", "寒冷", "零下"]):
+        return "冰河期阶段"
+    return DEFAULT_VISUAL_PHASE_LABEL
+
+
+def visual_phase_key(item: dict[str, Any], label: str, evidence_text: str = "") -> str:
+    explicit_key = str(item.get("visual_phase_key") or item.get("phase_key") or "").strip()
+    if explicit_key:
+        return normalize_visual_phase_key(explicit_key)
+    category = phase_category_key(" ".join([label, evidence_text]))
+    if category:
+        return category
+    if not label or label == DEFAULT_VISUAL_PHASE_LABEL:
+        return DEFAULT_VISUAL_PHASE_KEY
+    digest = hashlib.sha1(label.encode("utf-8")).hexdigest()[:10]
+    return f"phase-{digest}"
+
+
+def phase_category_key(text: str) -> str:
+    compact = str(text or "")
+    if has_any(compact, ["现代", "都市", "城市人", "西装", "牛仔", "汽车", "高楼"]):
+        return "modern"
+    if has_any(compact, ["农业", "农耕", "定居", "村落", "播种", "收割", "谷物", "陶罐", "田地"]):
+        return "agriculture_settlement"
+    if has_any(compact, ["采集", "狩猎", "迁徙", "旧石器", "兽皮", "石器", "木矛", "游动部落"]):
+        return "hunter_gatherer"
+    if has_any(compact, ["冰河", "严寒", "寒冷", "零下"]):
+        return "ice_age"
+    return ""
+
+
+def normalize_visual_phase_key(value: str) -> str:
+    clean = re.sub(r"\s+", "_", str(value or "").strip().lower())
+    clean = re.sub(r"[^0-9a-z_\-\u4e00-\u9fff]+", "", clean)
+    return clean or DEFAULT_VISUAL_PHASE_KEY
+
+
+def has_any(text: str, markers: list[str]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def normalize_visual_scene_payload(scene: dict[str, Any]) -> dict[str, Any]:
+    raw_name = str(scene.get("canonical_name") or scene.get("name") or "").strip()
+    canonical_name = canonical_visual_scene_name(raw_name, scene.get("aliases") or [])
+    visual_identity = scene.get("visual_identity")
+    if not isinstance(visual_identity, dict):
+        visual_identity = {}
+    raw_visual_identity = visual_identity
+    visual_identity = {
+        "era": str(visual_identity.get("era") or ""),
+        "environment_stage": str(
+            visual_identity.get("environment_stage")
+            or visual_identity.get("lifestyle_stage")
+            or visual_identity.get("civilization_stage")
+            or ""
+        ),
+        "region": str(visual_identity.get("region") or ""),
+        "terrain": str(visual_identity.get("terrain") or ""),
+        "weather": str(visual_identity.get("weather") or ""),
+        "lighting": str(visual_identity.get("lighting") or ""),
+        "palette": str(visual_identity.get("palette") or ""),
+        "mood": str(visual_identity.get("mood") or ""),
+        "typical_elements": [
+            str(item)
+            for item in (
+                visual_identity.get("typical_elements")
+                if isinstance(visual_identity.get("typical_elements"), list)
+                else []
+            )
+            if str(item).strip()
+        ],
+    }
+    phase_key, phase_label = visual_scene_phase_identity(scene, visual_identity | raw_visual_identity)
+    consistency_rules = scene.get("consistency_rules")
+    if not isinstance(consistency_rules, dict):
+        consistency_rules = {}
+    negative_rules = scene.get("negative_rules")
+    if negative_rules is None:
+        negative_rules = consistency_rules.get("avoid") or []
+    if not isinstance(negative_rules, list):
+        negative_rules = [str(negative_rules)]
+    scene_type = str(scene.get("scene_type") or scene.get("type") or "").strip()
+    short_description = str(
+        scene.get("short_description")
+        or scene.get("description")
+        or scene.get("role_in_script")
+        or ""
+    ).strip()
+    pinyin_key = scene_pinyin_key(canonical_name)
+    first_letter = (pinyin_key[:1] or "Z").upper()
+    normalized = dict(scene)
+    normalized.update(
+        {
+            "scene_id": str(scene.get("scene_id") or stable_visual_scene_id(canonical_name, phase_key)),
+            "canonical_name": canonical_name,
+            "visual_phase_key": phase_key,
+            "visual_phase_label": phase_label,
+            "pinyin_key": pinyin_key,
+            "first_letter": first_letter,
+            "scene_type": scene_type,
+            "short_description": short_description,
+            "visual_identity": visual_identity,
+            "consistency_rules": consistency_rules,
+            "negative_rules": [str(item) for item in negative_rules if str(item).strip()],
+            "status": str(scene.get("status") or "draft"),
+            "anchor_asset_id": str(scene.get("anchor_asset_id") or ""),
+            "visual_prompt": str(scene.get("visual_prompt") or build_scene_visual_prompt(canonical_name, visual_identity)),
+            "negative_prompt": str(
+                scene.get("negative_prompt")
+                or "，".join([str(item) for item in consistency_rules.get("avoid", []) if str(item).strip()])
+            ),
+            "workflow_name": str(scene.get("workflow_name") or "scene_anchor_v1"),
+            "role_in_script": str(scene.get("role_in_script") or ""),
+            "importance": int(scene.get("importance") or 0),
+            "first_appearance": str(scene.get("first_appearance") or ""),
+            "evidence_text": str(scene.get("evidence_text") or scene.get("first_appearance") or ""),
+            "extraction_confidence": str(scene.get("extraction_confidence") or ""),
+        }
+    )
+    return normalized
+
+
+def visual_scene_values(scene: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        scene["scene_id"],
+        scene["canonical_name"],
+        scene["visual_phase_key"],
+        scene["visual_phase_label"],
+        scene["pinyin_key"],
+        scene["first_letter"],
+        scene["scene_type"],
+        scene["short_description"],
+        json_dumps(scene.get("visual_identity") or {}),
+        json_dumps(scene.get("consistency_rules") or {}),
+        json_dumps(scene.get("negative_rules") or []),
+        scene.get("status", "draft"),
+        scene.get("anchor_asset_id", ""),
+        scene.get("visual_prompt", ""),
+        scene.get("negative_prompt", ""),
+        scene.get("workflow_name", ""),
+        json_dumps(scene),
+    )
+
+
+def script_visual_scene_values(generation_id: str, scene: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        generation_id,
+        scene["scene_id"],
+        scene.get("role_in_script", ""),
+        int(scene.get("importance") or 0),
+        scene.get("first_appearance", ""),
+        scene.get("evidence_text", ""),
+        scene.get("extraction_confidence", ""),
+        json_dumps(scene),
+    )
+
+
+def visual_scene_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    raw = json_loads(row["raw_json"], default={})
+    visual_identity = json_loads(row["visual_identity_json"], default={})
+    consistency_rules = json_loads(row["consistency_rules_json"], default={})
+    negative_rules = json_loads(row["negative_rules_json"], default=[])
+    scene = dict(raw)
+    scene.update(
+        {
+            "scene_id": row["scene_id"],
+            "canonical_name": row["canonical_name"],
+            "visual_phase_key": row["visual_phase_key"],
+            "visual_phase_label": row["visual_phase_label"],
+            "pinyin_key": row["pinyin_key"],
+            "first_letter": row["first_letter"],
+            "scene_type": row["scene_type"],
+            "short_description": row["short_description"],
+            "visual_identity": visual_identity,
+            "consistency_rules": consistency_rules,
+            "negative_rules": negative_rules,
+            "status": row["status"],
+            "anchor_asset_id": row["anchor_asset_id"],
+            "visual_prompt": row["visual_prompt"],
+            "negative_prompt": row["negative_prompt"],
+            "workflow_name": row["workflow_name"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "script_count": int(row["script_count"] or 0) if "script_count" in row.keys() else 0,
+            "has_visual_identity": bool(visual_identity),
+            "has_anchor_asset": bool(row["anchor_asset_id"]),
+        }
+    )
+    return scene
+
+
+def script_visual_scene_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    scene = visual_scene_from_row(row)
+    raw = json_loads(row["script_scene_raw_json"], default={})
+    scene.update(
+        {
+            "generation_id": row["generation_id"],
+            "role_in_script": row["role_in_script"],
+            "importance": row["importance"],
+            "first_appearance": row["first_appearance"],
+            "evidence_text": row["evidence_text"],
+            "extraction_confidence": row["extraction_confidence"],
+            "raw": raw,
+            "is_global_scene": True,
+        }
+    )
+    return scene
+
+
+def visual_scene_appearance_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "generation_id": row["generation_id"],
+        "topic": row["topic"] or "",
+        "created_at": row["created_at"] or "",
+        "time_range": row["time_range"] or "",
+        "role_in_script": row["role_in_script"],
+        "importance": row["importance"],
+        "first_appearance": row["first_appearance"],
+        "evidence_text": row["evidence_text"],
+        "extraction_confidence": row["extraction_confidence"],
+        "raw": json_loads(row["raw_json"], default={}),
+    }
+
+
+def stable_visual_scene_id(canonical_name: str, visual_phase_key: str = DEFAULT_VISUAL_PHASE_KEY) -> str:
+    digest = hashlib.sha1(f"{canonical_name}|{visual_phase_key}".encode("utf-8")).hexdigest()[:12]
+    return f"vsc-{digest}"
+
+
+def canonical_visual_scene_name(name: str, aliases: Any = None) -> str:
+    clean_name = str(name or "").strip()
+    alias_values = aliases if isinstance(aliases, list) else []
+    values = {clean_name, *[str(alias).strip() for alias in alias_values]}
+    if values & {"非洲东部稀树草原", "稀树草原", "非洲东部的稀树草原"}:
+        return "东非稀树草原"
+    if values & {"智人部落营地", "非洲部落营地"}:
+        return "非洲智人部落营地"
+    if values & {"红海渡口", "跨过红海"}:
+        return "红海海口迁徙渡口"
+    return clean_name
+
+
+SCENE_PINYIN_OVERRIDES = {
+    "布隆伯斯洞穴": "bulongbosidongxue",
+    "冰河期欧洲尼安德特人营地": "bingheqiouzhouniandeterenyingdi",
+    "东非稀树草原": "dongfeixishucaoyuan",
+    "洞穴壁画与葬礼仪式空间": "dongxuebihuayuzangliyishikongjian",
+    "非洲智人部落营地": "feizhouzhirenbuluoyingdi",
+    "篝火烹饪营地": "gouhuopengrenyingdi",
+    "红海海口迁徙渡口": "honghaihaikouqianxidukou",
+    "黎凡特冰河期遭遇地带": "lifantebingheqizaoyudidai",
+    "多巴火山灾变": "duobahuoshanzaibian",
+    "印度洋海岸迁徙路线": "yinduyanghaianqianxiluxian",
+    "巽他大陆尽头海峡": "xuntadalujintouhaixia",
+}
+
+
+def scene_pinyin_key(name: str) -> str:
+    clean_name = str(name or "").strip()
+    if clean_name in SCENE_PINYIN_OVERRIDES:
+        return SCENE_PINYIN_OVERRIDES[clean_name]
+    if clean_name and clean_name[0].isascii():
+        return re.sub(r"[^0-9a-z]+", "", clean_name.lower()) or "z"
+    return f"z{clean_name}"
+
+
+def build_scene_visual_prompt(canonical_name: str, visual_identity: dict[str, Any]) -> str:
+    parts = [
+        canonical_name,
+        str(visual_identity.get("era") or ""),
+        str(visual_identity.get("region") or ""),
+        str(visual_identity.get("terrain") or ""),
+        str(visual_identity.get("weather") or ""),
+        str(visual_identity.get("lighting") or ""),
+        str(visual_identity.get("palette") or ""),
+        str(visual_identity.get("mood") or ""),
+        "、".join(str(item) for item in visual_identity.get("typical_elements") or []),
+    ]
+    return "，".join(part for part in parts if part)
+
+
+def group_visual_scenes(scenes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for scene in scenes:
+        letter = str(scene.get("first_letter") or "#").upper()
+        grouped.setdefault(letter, []).append(scene)
+    return [
+        {"letter": letter, "scenes": grouped[letter], "count": len(grouped[letter])}
+        for letter in sorted(grouped)
+    ]
+
+
+def stable_visual_subject_id(canonical_name: str, visual_phase_key: str = DEFAULT_VISUAL_PHASE_KEY) -> str:
+    digest = hashlib.sha1(f"{canonical_name}|{visual_phase_key}".encode("utf-8")).hexdigest()[:12]
     return f"vs-{digest}"
 
 
@@ -1902,6 +2615,87 @@ def ensure_table_columns(connection: sqlite3.Connection, table: str, columns: di
     for name, ddl in columns.items():
         if name not in existing:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def backfill_visual_phase_metadata(connection: sqlite3.Connection) -> None:
+    backfill_visual_subject_phases(connection)
+    backfill_visual_scene_phases(connection)
+
+
+def backfill_visual_subject_phases(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT subject_id, canonical_name, subject_type, short_description,
+               visual_identity_json, raw_json, visual_phase_key, visual_phase_label
+        FROM visual_subjects
+        """
+    ).fetchall()
+    for row in rows:
+        current_key = str(row["visual_phase_key"] or "").strip()
+        current_label = str(row["visual_phase_label"] or "").strip()
+        if current_key not in {"", DEFAULT_VISUAL_PHASE_KEY} and current_label not in {"", DEFAULT_VISUAL_PHASE_LABEL}:
+            continue
+        raw = json_loads(row["raw_json"], default={})
+        payload = raw if isinstance(raw, dict) else {}
+        payload = dict(payload)
+        payload.setdefault("canonical_name", row["canonical_name"])
+        payload.setdefault("subject_type", row["subject_type"])
+        payload.setdefault("short_description", row["short_description"])
+        payload.setdefault("visual_identity", json_loads(row["visual_identity_json"], default={}))
+        normalized = normalize_visual_subject_payload(payload)
+        connection.execute(
+            """
+            UPDATE visual_subjects
+            SET visual_phase_key = ?,
+                visual_phase_label = ?,
+                raw_json = ?
+            WHERE subject_id = ?
+            """,
+            (
+                normalized["visual_phase_key"],
+                normalized["visual_phase_label"],
+                json_dumps(normalized),
+                row["subject_id"],
+            ),
+        )
+
+
+def backfill_visual_scene_phases(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        """
+        SELECT scene_id, canonical_name, scene_type, short_description,
+               visual_identity_json, raw_json, visual_phase_key, visual_phase_label
+        FROM visual_scenes
+        """
+    ).fetchall()
+    for row in rows:
+        current_key = str(row["visual_phase_key"] or "").strip()
+        current_label = str(row["visual_phase_label"] or "").strip()
+        if current_key not in {"", DEFAULT_VISUAL_PHASE_KEY} and current_label not in {"", DEFAULT_VISUAL_PHASE_LABEL}:
+            continue
+        raw = json_loads(row["raw_json"], default={})
+        payload = raw if isinstance(raw, dict) else {}
+        payload = dict(payload)
+        payload.setdefault("canonical_name", row["canonical_name"])
+        payload.setdefault("scene_type", row["scene_type"])
+        payload.setdefault("short_description", row["short_description"])
+        payload.setdefault("visual_identity", json_loads(row["visual_identity_json"], default={}))
+        normalized = normalize_visual_scene_payload(payload)
+        connection.execute(
+            """
+            UPDATE visual_scenes
+            SET visual_phase_key = ?,
+                visual_phase_label = ?,
+                raw_json = ?
+            WHERE scene_id = ?
+            """,
+            (
+                normalized["visual_phase_key"],
+                normalized["visual_phase_label"],
+                json_dumps(normalized),
+                row["scene_id"],
+            ),
+        )
 
 
 def current_timestamp() -> str:

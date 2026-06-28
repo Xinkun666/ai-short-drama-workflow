@@ -8,6 +8,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from drama_agents.visual_scene_agent import build_scene_anchor_negative_prompt, build_scene_anchor_prompt
+
 
 HISTORY_CARTOON_STYLE_POLICY = """
 历史科普卡通短剧视觉风格：
@@ -82,6 +84,47 @@ class VisualAnchorAgent:
             "prompt": final_prompt,
             "negative_prompt": final_negative_prompt,
             "workflow_name": str(generated.get("workflow_name") or workflow_name_for_provider(generated)),
+        }
+
+    def generate_scene_anchor(
+        self,
+        *,
+        scene: dict[str, Any],
+        output_dir: Path | str,
+        prompt: str | None = None,
+        negative_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.provider:
+            raise RuntimeError("未配置 OPENAI_API_KEY 或 ARK_API_KEY，无法生成场景图。")
+        final_prompt = str(prompt or "").strip() or build_scene_anchor_prompt(scene)
+        final_negative_prompt = (
+            str(negative_prompt).strip()
+            if negative_prompt is not None
+            else build_scene_anchor_negative_prompt(scene)
+        )
+        generated = self.provider.generate_image(prompt=final_prompt, negative_prompt=final_negative_prompt)
+        image_bytes = generated.get("image_bytes")
+        if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
+            raise RuntimeError("图片接口没有返回可保存的图片内容。")
+
+        mime_type = str(generated.get("mime_type") or "image/png")
+        extension = image_extension(mime_type)
+        scene_id = str(scene.get("scene_id") or scene.get("canonical_name") or "scene").strip() or "scene"
+        asset_dir = Path(output_dir) / safe_asset_name(scene_id)
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        asset_path = asset_dir / f"anchor.{extension}"
+        asset_path.write_bytes(bytes(image_bytes))
+        return {
+            "asset_path": asset_path,
+            "mime_type": mime_type,
+            "model": str(generated.get("model") or ""),
+            "provider": str(generated.get("provider") or "ark"),
+            "prompt": final_prompt,
+            "negative_prompt": final_negative_prompt,
+            "workflow_name": str(
+                generated.get("workflow_name")
+                or workflow_name_for_provider(generated, asset_type="scene")
+            ),
         }
 
 
@@ -378,16 +421,17 @@ def should_try_next_ark_model(message: str) -> bool:
     return any(marker in message for marker in retry_markers)
 
 
-def workflow_name_for_provider(generated: dict[str, Any]) -> str:
+def workflow_name_for_provider(generated: dict[str, Any], *, asset_type: str = "subject") -> str:
     provider = str(generated.get("provider") or "")
     model = str(generated.get("model") or "")
+    prefix = "scene" if asset_type == "scene" else "subject"
     if provider == "openai" and model == "gpt-image-2":
-        return "openai_gpt_image_2_subject_anchor_v1"
+        return f"openai_gpt_image_2_{prefix}_anchor_v1"
     if provider == "openai":
-        return "openai_image_subject_anchor_v1"
+        return f"openai_image_{prefix}_anchor_v1"
     if provider == "ark":
-        return "ark_seeddream_subject_anchor_v1"
-    return "subject_anchor_v1"
+        return f"ark_seeddream_{prefix}_anchor_v1"
+    return f"{prefix}_anchor_v1"
 
 
 def safe_asset_name(value: str) -> str:
