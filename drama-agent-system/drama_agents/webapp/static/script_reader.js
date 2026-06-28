@@ -27,8 +27,25 @@
   const selectionHistory = root.querySelector("[data-selection-history]");
   const selectionHistoryPanel = root.querySelector("[data-selection-history-panel]");
   const selectionClear = root.querySelector("[data-selection-clear]");
-  const initialChatHtml = ragChat.innerHTML;
-  const defaultComposerPlaceholder = ragComposer.getAttribute("placeholder") || "";
+  const assistantEnabled = Boolean(
+    ragChat &&
+      ragComposer &&
+      ragAsk &&
+      ragStatus &&
+      conversationTitle &&
+      conversationNew &&
+      conversationList &&
+      selectionCard &&
+      selectionSummary &&
+      selectionExplain &&
+      selectionReview &&
+      selectionEdit &&
+      selectionHistory &&
+      selectionHistoryPanel &&
+      selectionClear
+  );
+  const initialChatHtml = assistantEnabled ? ragChat.innerHTML : "";
+  const defaultComposerPlaceholder = assistantEnabled ? ragComposer.getAttribute("placeholder") || "" : "";
   const selectionQuoteStart = "【选中的剧本文字】\n";
   const selectionQuoteEnd = "\n【你的问题或修改要求】\n";
   let currentConversationId = "";
@@ -654,58 +671,60 @@
     setEditMode(false);
   });
   editSave.addEventListener("click", saveArticle);
-  conversationNew.addEventListener("click", () => createConversation("新对话", { load: true }));
-  if (conversationMore) {
-    conversationMore.addEventListener("click", () => {
-      conversationsExpanded = !conversationsExpanded;
-      renderConversationList();
+  if (assistantEnabled) {
+    conversationNew.addEventListener("click", () => createConversation("新对话", { load: true }));
+    if (conversationMore) {
+      conversationMore.addEventListener("click", () => {
+        conversationsExpanded = !conversationsExpanded;
+        renderConversationList();
+      });
+    }
+    ragAsk.addEventListener("click", askAgent);
+    ragComposer.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        askAgent();
+      } else if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+        event.preventDefault();
+        askAgent();
+      }
     });
+    ragComposer.addEventListener("input", autoResizeComposer);
+    selectionExplain.addEventListener("click", () => {
+      if (requireSelection()) {
+        sendAssistantMessage("解释这段", "explain", selectedSelection);
+      }
+    });
+    selectionReview.addEventListener("click", () => {
+      if (requireSelection()) {
+        sendAssistantMessage("评审这段", "review", selectedSelection);
+      }
+    });
+    selectionEdit.addEventListener("click", () => {
+      if (!requireSelection()) {
+        return;
+      }
+      ragComposer.placeholder = "请描述你想怎么改这段";
+      const message = parseComposerSubmission().message.trim() || "帮我改写这段";
+      ragComposer.value = "";
+      autoResizeComposer();
+      sendAssistantMessage(message, "edit", selectedSelection);
+    });
+    selectionHistory.addEventListener("click", () => {
+      if (requireSelection()) {
+        loadSelectionHistory(selectedSelection.text);
+      }
+    });
+    selectionClear.addEventListener("click", clearSelection);
+    display.addEventListener("mousedown", () => {
+      isPointerSelecting = true;
+    });
+    display.addEventListener("touchstart", () => {
+      isPointerSelecting = true;
+    });
+    display.addEventListener("keyup", updateSelectedText);
+    document.addEventListener("mouseup", syncSelectionAfterPointerUp);
+    document.addEventListener("touchend", syncSelectionAfterPointerUp);
+    initializeConversations();
   }
-  ragAsk.addEventListener("click", askAgent);
-  ragComposer.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      askAgent();
-    } else if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-      event.preventDefault();
-      askAgent();
-    }
-  });
-  ragComposer.addEventListener("input", autoResizeComposer);
-  selectionExplain.addEventListener("click", () => {
-    if (requireSelection()) {
-      sendAssistantMessage("解释这段", "explain", selectedSelection);
-    }
-  });
-  selectionReview.addEventListener("click", () => {
-    if (requireSelection()) {
-      sendAssistantMessage("评审这段", "review", selectedSelection);
-    }
-  });
-  selectionEdit.addEventListener("click", () => {
-    if (!requireSelection()) {
-      return;
-    }
-    ragComposer.placeholder = "请描述你想怎么改这段";
-    const message = parseComposerSubmission().message.trim() || "帮我改写这段";
-    ragComposer.value = "";
-    autoResizeComposer();
-    sendAssistantMessage(message, "edit", selectedSelection);
-  });
-  selectionHistory.addEventListener("click", () => {
-    if (requireSelection()) {
-      loadSelectionHistory(selectedSelection.text);
-    }
-  });
-  selectionClear.addEventListener("click", clearSelection);
-  display.addEventListener("mousedown", () => {
-    isPointerSelecting = true;
-  });
-  display.addEventListener("touchstart", () => {
-    isPointerSelecting = true;
-  });
-  display.addEventListener("keyup", updateSelectedText);
-  document.addEventListener("mouseup", syncSelectionAfterPointerUp);
-  document.addEventListener("touchend", syncSelectionAfterPointerUp);
-  initializeConversations();
 })();

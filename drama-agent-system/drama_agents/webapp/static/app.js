@@ -294,8 +294,6 @@ function renderScriptGenerations() {
             <span class="record-value">${escapeHtml(record.time_range || "")}</span>
           </div>
           <a class="record-action" href="/script-generations/${encodeURIComponent(record.generation_id)}/script">剧本</a>
-          <a class="record-action" href="/script-generations/${encodeURIComponent(record.generation_id)}/subjects">主题</a>
-          <a class="record-action" href="/script-generations/${encodeURIComponent(record.generation_id)}/maps">地点</a>
           <button class="record-action delete" type="button" data-script-delete="${escapeHtml(record.generation_id)}">删除</button>
         </div>
       `;

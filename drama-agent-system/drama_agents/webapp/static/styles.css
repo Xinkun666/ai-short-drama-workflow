@@ -1197,19 +1197,19 @@ h1 {
 
 .script-reader-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(620px, 700px);
-  gap: 28px;
-  align-items: stretch;
-  height: calc(100vh - 180px);
-  min-height: 620px;
-  overflow: hidden;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  height: auto;
+  min-height: 0;
+  overflow: visible;
 }
 
 .script-reader-main {
   min-width: 0;
-  height: 100%;
-  overflow-y: auto;
-  padding-right: 8px;
+  height: auto;
+  overflow-y: visible;
+  padding-right: 0;
   display: grid;
   align-content: start;
   gap: 16px;

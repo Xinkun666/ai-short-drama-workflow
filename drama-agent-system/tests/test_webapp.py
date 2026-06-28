@@ -1,5 +1,6 @@
 from pathlib import Path
 from io import BytesIO
+import re
 import sqlite3
 
 from pypdf import PdfWriter
@@ -609,6 +610,21 @@ def test_script_generations_api_lists_and_deletes_generated_scripts(tmp_path):
     assert delete_response.get_json()["generations"] == []
 
 
+def test_script_generation_record_actions_show_script_and_delete_only():
+    app_js = Path(__file__).parents[1] / "drama_agents" / "webapp" / "static" / "app.js"
+    render_script_records = app_js.read_text(encoding="utf-8").split("function renderScriptGenerations()", 1)[1].split(
+        "async function uploadSelectedFile",
+        1,
+    )[0]
+
+    action_labels = re.findall(r'<a class="record-action"[^>]*>([^<]+)</a>', render_script_records)
+
+    assert action_labels == ["剧本"]
+    assert "data-script-delete" in render_script_records
+    assert "/subjects" not in render_script_records
+    assert "/maps" not in render_script_records
+
+
 def test_script_generation_dedicated_view_pages_render_saved_sections(tmp_path):
     library = tmp_path / "资料库"
     library.mkdir()
@@ -646,11 +662,12 @@ def test_script_generation_dedicated_view_pages_render_saved_sections(tmp_path):
     assert 'data-script-reader="' in script_html
     assert "编辑" in script_html
     assert "保存" in script_html
-    assert "剧本对话助手" in script_html
+    assert "剧本对话助手" not in script_html
     assert "RAG 助手" not in script_html
     assert "构建向量库" not in script_html
-    assert 'data-rag-chat' in script_html
-    assert 'data-rag-composer' in script_html
+    assert "data-rag-" not in script_html
+    assert "data-conversation-" not in script_html
+    assert "data-selection-" not in script_html
     assert 'data-script-editor hidden' in script_html
     assert "script_reader.js" in script_html
     assert "已选内容" not in script_html
@@ -2169,7 +2186,6 @@ def test_script_reader_uses_chinese_article_typography():
     workspace_rule = styles[styles.index(".script-reader-workspace {") : styles.index(".script-editor-toolbar")]
     main_rule = styles[styles.index(".script-reader-main {") : styles.index(".script-editor-toolbar")]
     toolbar_rule = styles[styles.index(".script-editor-toolbar {") : styles.index(".script-editor-toolbar h3")]
-    rag_rule = styles[styles.index(".script-rag-panel {") : styles.index(".script-rag-head")]
 
     assert "text-indent: 2em;" in article_rule
     assert "margin: 0;" in article_rule
@@ -2178,15 +2194,14 @@ def test_script_reader_uses_chinese_article_typography():
     assert "[hidden]" in styles
     assert "display: none !important;" in styles
     assert "width: min(100vw - 64px, 1420px);" in page_shell_rule
-    assert "grid-template-columns: minmax(0, 1fr) minmax(620px, 700px);" in workspace_rule
-    assert "gap: 28px;" in workspace_rule
+    assert "grid-template-columns: minmax(0, 1fr);" in workspace_rule
+    assert "height: auto;" in workspace_rule
+    assert "overflow: visible;" in workspace_rule
     assert "max-width: 100%;" in article_card_rule
     assert "max-width: 100%;" in toolbar_rule
-    assert "height: calc(100vh - 180px);" in workspace_rule
-    assert "overflow-y: auto;" in main_rule
-    assert "position: sticky;" in rag_rule
-    assert "top: 18px;" in rag_rule
-    assert "height: 100%;" in rag_rule
+    assert "height: auto;" in main_rule
+    assert "overflow-y: visible;" in main_rule
+    assert "const assistantEnabled" in reader_script
     assert ".script-rag-message::before" in styles
     assert '.script-rag-message.user::before' in styles
     assert '.script-rag-message.assistant::before' in styles
@@ -2206,20 +2221,12 @@ def test_script_reader_uses_chinese_article_typography():
     assert "/assistant/selection-history" in reader_script
     assert "/assist/history" not in reader_script
     assert "ragComposer.value = selectedText" not in reader_script
-    assert "data-conversation-title" in template
-    assert "data-conversation-new" in template
-    assert "data-conversation-sidebar" in template
-    assert "data-conversation-more" in template
+    assert "剧本对话助手" not in template
+    assert "data-rag-" not in template
+    assert "data-conversation-" not in template
+    assert "data-selection-" not in template
     assert "styles.css') }}?v=20260627c" in template
     assert "script_reader.js') }}?v=20260627c" in template
-    assert "data-conversation-list" in template
-    assert "data-selection-card" in template
-    assert "data-selection-summary" in template
-    assert "data-selection-explain" in template
-    assert "data-selection-review" in template
-    assert "data-selection-edit" in template
-    assert "data-selection-history" in template
-    assert "data-selection-clear" in template
     assert ".script-conversation-bar" in styles
     assert ".script-conversation-sidebar" in styles
     assert ".script-conversation-list" in styles
@@ -2239,12 +2246,12 @@ def test_conversation_list_limits_to_three_in_frontend_logic():
     template = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "templates" / "script_generation_view.html").read_text(encoding="utf-8")
     styles = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "styles.css").read_text(encoding="utf-8")
 
-    assert "data-conversation-sidebar" in template
-    assert "script-conversation-sidebar" in template
+    assert "data-conversation-sidebar" not in template
+    assert "script-conversation-sidebar" not in template
     assert "script-conversation-more-menu" in reader_script
     assert "conversationsExpanded" in reader_script
     assert "conversations.slice(0, 3)" in reader_script
-    assert "data-conversation-more" in template
+    assert "data-conversation-more" not in template
     assert ".script-conversation-more-menu" in styles
 
 
@@ -2268,11 +2275,11 @@ def test_composer_send_button_is_compact_inside_textarea():
     styles = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "styles.css").read_text(encoding="utf-8")
     reader_script = (Path(__file__).parent.parent / "drama_agents" / "webapp" / "static" / "script_reader.js").read_text(encoding="utf-8")
 
-    assert "script-rag-composer-inner" in template
-    assert 'class="script-rag-send"' in template
+    assert "script-rag-composer-inner" not in template
+    assert 'class="script-rag-send"' not in template
     send_rule = styles[styles.index(".script-rag-send") : styles.index(".script-rag-send:hover")]
     assert "position: absolute;" in send_rule
-    assert "Enter 发送，Shift + Enter 换行" in template
+    assert "Enter 发送，Shift + Enter 换行" not in template
     assert 'event.key === "Enter" && !event.shiftKey' in reader_script
 
 
