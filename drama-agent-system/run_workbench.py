@@ -8,6 +8,9 @@ from pathlib import Path
 from drama_agents.webapp.app import create_app
 
 
+DEFAULT_LOCAL_API_KEYS = ("DEEPSEEK_API_KEY", "ARK_API_KEY", "OPENAI_API_KEY")
+
+
 def parse_args() -> argparse.Namespace:
     app_root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description="启动本地 AI 短剧工作站")
@@ -18,15 +21,17 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_local_deepseek_key() -> bool:
-    if os.environ.get("DEEPSEEK_API_KEY"):
-        return False
+def load_local_api_keys(key_names: tuple[str, ...] = DEFAULT_LOCAL_API_KEYS) -> dict[str, bool]:
+    loaded = {key_name: False for key_name in key_names}
+    missing_keys = {key_name for key_name in key_names if not os.environ.get(key_name)}
+    if not missing_keys:
+        return loaded
     zshrc = Path.home() / ".zshrc"
     if not zshrc.exists():
-        return False
+        return loaded
     for raw_line in zshrc.read_text(encoding="utf-8", errors="ignore").splitlines():
         line = raw_line.strip()
-        if not line or line.startswith("#") or "DEEPSEEK_API_KEY" not in line:
+        if not line or line.startswith("#") or not any(key_name in line for key_name in missing_keys):
             continue
         try:
             parts = shlex.split(line, comments=True, posix=True)
@@ -35,26 +40,37 @@ def load_local_deepseek_key() -> bool:
         if parts and parts[0] == "export":
             parts = parts[1:]
         for part in parts:
-            if not part.startswith("DEEPSEEK_API_KEY="):
+            if "=" not in part:
                 continue
-            value = part.split("=", 1)[1].strip()
+            key_name, value = part.split("=", 1)
+            if key_name not in missing_keys:
+                continue
+            value = value.strip()
             if value:
-                os.environ["DEEPSEEK_API_KEY"] = value
-                return True
-    return False
+                os.environ[key_name] = value
+                loaded[key_name] = True
+                missing_keys.remove(key_name)
+        if not missing_keys:
+            break
+    return loaded
+
+
+def load_local_deepseek_key() -> bool:
+    return load_local_api_keys(("DEEPSEEK_API_KEY",))["DEEPSEEK_API_KEY"]
 
 
 def main() -> None:
     args = parse_args()
-    key_loaded = load_local_deepseek_key()
+    loaded_keys = load_local_api_keys()
     workspace = Path(args.workspace).resolve()
     outputs = Path(args.outputs).resolve()
     app = create_app(workspace=workspace, outputs=outputs)
     print(f"AI短剧工作站: http://{args.host}:{args.port}")
     print(f"workspace: {workspace}")
     print(f"outputs: {outputs}")
-    if key_loaded:
-        print("DEEPSEEK_API_KEY: loaded from local shell config")
+    for key_name, loaded in loaded_keys.items():
+        if loaded:
+            print(f"{key_name}: loaded from local shell config")
     app.run(host=args.host, port=args.port, debug=False)
 
 

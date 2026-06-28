@@ -7,7 +7,11 @@ const state = {
   visualScriptSubjects: [],
   visualRejectedCandidates: [],
   selectedVisualScriptId: "",
-  selectedVisualSubjectId: "",
+  visualSubjectQuery: "",
+  visualMode: "all",
+  visualScriptStage: "list",
+  visualScriptStatuses: {},
+  visualScriptSubjectCounts: {},
   timelineSources: [],
   selectedTimelineIds: new Set(),
   selected: null,
@@ -50,6 +54,9 @@ const elements = {
   scriptMatchedEvents: document.querySelector("#scriptMatchedEvents"),
   sceneModuleTabs: document.querySelectorAll("[data-scene-tab]"),
   sceneModulePanels: document.querySelectorAll("[data-scene-panel]"),
+  visualModeTabs: document.querySelectorAll("[data-visual-mode]"),
+  visualScriptBackButtons: document.querySelectorAll("[data-visual-script-back]"),
+  visualWorkbenchGrid: document.querySelector("#visualWorkbenchGrid"),
   visualScriptFileInput: document.querySelector("#visualScriptFileInput"),
   visualUploadButton: document.querySelector("#visualUploadButton"),
   visualScriptSelect: document.querySelector("#visualScriptSelect"),
@@ -58,11 +65,12 @@ const elements = {
   visualCurrentScript: document.querySelector("#visualCurrentScript"),
   refreshVisualSubjectsButton: document.querySelector("#refreshVisualSubjectsButton"),
   refreshVisualScriptSubjectsButton: document.querySelector("#refreshVisualScriptSubjectsButton"),
+  visualScriptList: document.querySelector("#visualScriptList"),
+  visualSelectedScriptTitle: document.querySelector("#visualSelectedScriptTitle"),
+  visualSubjectSearchInput: document.querySelector("#visualSubjectSearchInput"),
   visualSubjectPool: document.querySelector("#visualSubjectPool"),
   visualScriptSubjects: document.querySelector("#visualScriptSubjects"),
   visualRejectedCandidates: document.querySelector("#visualRejectedCandidates"),
-  visualSubjectDetail: document.querySelector("#visualSubjectDetail"),
-  visualAnchorButton: document.querySelector("#visualAnchorButton"),
 };
 
 function setActiveView(viewName) {
@@ -87,6 +95,18 @@ function setActiveView(viewName) {
     });
   } else {
     closeTimelinePicker();
+  }
+}
+
+function viewNameFromHash() {
+  const viewName = window.location.hash.replace("#", "");
+  return ["materials", "script", "scene"].includes(viewName) ? viewName : "";
+}
+
+function applyHashView() {
+  const viewName = viewNameFromHash();
+  if (viewName) {
+    setActiveView(viewName);
   }
 }
 
@@ -368,6 +388,7 @@ function renderVisualScriptSelect() {
     elements.visualScriptSelect.innerHTML = '<option value="">暂无已有剧本</option>';
     state.selectedVisualScriptId = "";
     updateVisualCurrentScript();
+    renderVisualScriptList();
     renderVisualScriptSubjects();
     return;
   }
@@ -382,21 +403,106 @@ function renderVisualScriptSelect() {
     })
     .join("");
   updateVisualCurrentScript();
+  renderVisualScriptList();
   if (state.selectedVisualScriptId) {
     loadScriptVisualSubjects(state.selectedVisualScriptId).catch((error) => setVisualStatus(error.message, "error"));
   }
 }
 
+function groupedVisualSubjectsForDisplay() {
+  const query = state.visualSubjectQuery.trim().toLowerCase();
+  const filtered = state.visualSubjects.filter((subject) => {
+    if (!query) return true;
+    const haystack = [
+      subject.canonical_name,
+      subject.short_description,
+      subject.subject_type,
+      subject.pinyin_key,
+      ...(subject.aliases || []),
+    ]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(query);
+  });
+  const grouped = new Map();
+  filtered.forEach((subject) => {
+    const letter = String(subject.first_letter || "#").toUpperCase();
+    if (!grouped.has(letter)) {
+      grouped.set(letter, []);
+    }
+    grouped.get(letter).push(subject);
+  });
+  return [...grouped.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([letter, subjects]) => ({
+      letter,
+      subjects: subjects.sort((left, right) =>
+        `${left.pinyin_key || ""}${left.canonical_name || ""}`.localeCompare(
+          `${right.pinyin_key || ""}${right.canonical_name || ""}`
+        )
+      ),
+    }));
+}
+
+function visualStatusLabel(status) {
+  const labels = {
+    not_parsed: "未解析",
+    parsing: "解析中",
+    parsed: "已解析",
+    failed: "解析失败",
+  };
+  return labels[status] || "未解析";
+}
+
+function visualScriptParseStatus(generationId) {
+  return state.visualScriptStatuses[generationId] || "not_parsed";
+}
+
+function visualSubjectTypeLabel(type) {
+  const labels = {
+    species: "物种",
+    group: "人群",
+    character: "角色",
+    civilization_group: "族群",
+    symbolic_entity: "视觉符号",
+    organization: "组织",
+  };
+  return labels[type] || type || "未分类";
+}
+
+function visualImportanceLabel(importance) {
+  const score = Number(importance || 0);
+  if (score >= 5) return "核心主角";
+  if (score >= 4) return "对照主体";
+  if (score >= 3) return "重点主体";
+  return "辅助主体";
+}
+
 function renderVisualSubjectPool() {
   if (!elements.visualSubjectPool) return;
-  if (!state.visualSubjectGroups.length) {
-    elements.visualSubjectPool.innerHTML = '<div class="empty-record">暂无主体，选择剧本后点击开始解析。</div>';
+  const groups = groupedVisualSubjectsForDisplay();
+  if (!state.visualSubjects.length) {
+    elements.visualSubjectPool.innerHTML = `
+      <div class="visual-empty-state">
+        <strong>暂无主体</strong>
+        <span>选择剧本并点击“解析主体”后，系统会自动识别需要保持视觉一致的角色、人群和物种。</span>
+      </div>
+    `;
     return;
   }
-  elements.visualSubjectPool.innerHTML = state.visualSubjectGroups
+  if (!groups.length) {
+    elements.visualSubjectPool.innerHTML = `
+      <div class="visual-empty-state">
+        <strong>没有匹配的主体</strong>
+        <span>换一个关键词试试，例如智人、尼安德特人。</span>
+      </div>
+    `;
+    return;
+  }
+  elements.visualSubjectPool.innerHTML = groups
     .map((group) => {
       const cards = (group.subjects || [])
-        .map((subject) => renderVisualSubjectCard(subject))
+        .map((subject) => renderVisualSubjectListItem(subject))
         .join("");
       return `
         <section class="visual-subject-group">
@@ -406,36 +512,143 @@ function renderVisualSubjectPool() {
       `;
     })
     .join("");
-  elements.visualSubjectPool.querySelectorAll("[data-visual-subject]").forEach((button) => {
-    button.addEventListener("click", () => showVisualSubjectDetail(button.dataset.visualSubject));
+  bindVisualSubjectActions(elements.visualSubjectPool);
+}
+
+function bindVisualSubjectActions(root) {
+  root.querySelectorAll("[data-visual-subject-card]").forEach((card) => {
+    card.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return;
+      window.location.href = visualSubjectDetailUrl(card.dataset.visualSubjectCard);
+    });
   });
-  elements.visualSubjectPool.querySelectorAll("[data-visual-anchor]").forEach((button) => {
-    button.addEventListener("click", () => requestVisualAnchor(button.dataset.visualAnchor));
+}
+
+function visualSubjectDetailUrl(subjectId) {
+  return `/visual/subjects/${encodeURIComponent(subjectId || "")}`;
+}
+
+function renderVisualSubjectListItem(subject) {
+  return renderVisualSubjectCard(subject);
+}
+
+function renderVisualScriptSubjectItem(subject) {
+  return `
+    <article class="visual-script-subject-row">
+      <div class="visual-script-subject-copy">
+        <strong>${escapeHtml(subject.canonical_name)}</strong>
+        <em>${escapeHtml(visualImportanceLabel(subject.importance))} · 重要度 ${escapeHtml(String(subject.importance || 0))}</em>
+        <p>${escapeHtml(subject.role_in_script || "")}</p>
+      </div>
+      <a href="${visualSubjectDetailUrl(subject.subject_id)}">详情</a>
+    </article>
+  `;
+}
+
+function sortVisualScriptSubjectsByImportance(subjects) {
+  return [...subjects].sort((left, right) => {
+    const importanceGap = Number(right.importance || 0) - Number(left.importance || 0);
+    if (importanceGap !== 0) return importanceGap;
+    return `${left.pinyin_key || ""}${left.canonical_name || ""}`.localeCompare(
+      `${right.pinyin_key || ""}${right.canonical_name || ""}`
+    );
   });
 }
 
 function renderVisualSubjectCard(subject) {
   const identityStatus = subject.has_visual_identity ? "已有视觉设定" : "待补视觉设定";
-  const anchorStatus = subject.has_anchor_asset ? "已有主体锚点图" : "待生成锚点图";
+  const anchorStatus = subject.has_anchor_asset ? "已生成锚点图" : "未生成锚点图";
   return `
-    <article class="visual-subject-card">
+    <article class="visual-subject-card" data-visual-subject-card="${escapeHtml(subject.subject_id)}" tabindex="0">
       <div class="visual-subject-card-head">
         <strong>${escapeHtml(subject.canonical_name || "")}</strong>
-        <span>${escapeHtml(subject.subject_type || "未分类")}</span>
+        <span>${escapeHtml(visualSubjectTypeLabel(subject.subject_type || ""))}</span>
       </div>
       <p>${escapeHtml(subject.short_description || "暂无描述")}</p>
-      <dl class="visual-subject-meta">
-        <div><dt>剧本数量</dt><dd>${formatNumber(subject.script_count || 0)}</dd></div>
-        <div><dt>视觉设定</dt><dd>${identityStatus}</dd></div>
-        <div><dt>锚点图</dt><dd>${anchorStatus}</dd></div>
-      </dl>
-      <div class="visual-subject-actions">
-        <button type="button" data-visual-subject="${escapeHtml(subject.subject_id)}">查看</button>
-        <button type="button" data-visual-subject="${escapeHtml(subject.subject_id)}">编辑</button>
-        <button type="button" data-visual-anchor="${escapeHtml(subject.subject_id)}">生成锚点图</button>
+      <div class="visual-subject-status-row">
+        <span>${identityStatus}</span>
+        <span>${anchorStatus}</span>
+        <span>${formatNumber(subject.script_count || 0)} 个剧本</span>
       </div>
+      <a href="${visualSubjectDetailUrl(subject.subject_id)}">详情</a>
     </article>
   `;
+}
+
+function renderVisualScriptList() {
+  if (!elements.visualScriptList) return;
+  if (!state.scriptGenerations.length) {
+    elements.visualScriptList.innerHTML = `
+      <div class="visual-empty-state compact">
+        <strong>暂无剧本</strong>
+        <span>先在“剧本生成”里生成剧本，或从顶部上传剧本文本。</span>
+      </div>
+    `;
+    return;
+  }
+  elements.visualScriptList.innerHTML = state.scriptGenerations
+    .map((script) => {
+      const isActive = script.generation_id === state.selectedVisualScriptId;
+      const status = visualScriptParseStatus(script.generation_id);
+      const count = state.visualScriptSubjectCounts[script.generation_id] || 0;
+      const label = status === "parsed" ? `已识别 ${count} 个主体` : visualStatusLabel(status);
+      return `
+        <article class="visual-script-item ${isActive ? "active" : ""}">
+          <div>
+            <strong>${escapeHtml(script.script_title || script.topic || script.generation_id)}</strong>
+            <span>${escapeHtml(script.created_at || "")}</span>
+            <em data-status="${escapeHtml(status)}">${escapeHtml(label)}</em>
+          </div>
+          <button class="visual-script-open" type="button" data-visual-script="${escapeHtml(script.generation_id)}">主体</button>
+        </article>
+      `;
+    })
+    .join("");
+  elements.visualScriptList.querySelectorAll("[data-visual-script]").forEach((button) => {
+    button.addEventListener("click", () => selectVisualScript(button.dataset.visualScript));
+  });
+}
+
+function selectVisualScript(generationId) {
+  if (!generationId) return;
+  state.selectedVisualScriptId = generationId;
+  elements.visualScriptSelect.value = generationId;
+  setVisualSubjectMode("scripts", { scriptStage: "subjects" });
+  updateVisualCurrentScript();
+  renderVisualScriptList();
+  loadScriptVisualSubjects(generationId).catch((error) => setVisualStatus(error.message, "error"));
+}
+
+function setVisualSubjectMode(mode, options = {}) {
+  const nextMode = mode === "scripts" ? "scripts" : "all";
+  state.visualMode = nextMode;
+  if (nextMode === "scripts") {
+    const scriptStage = options.scriptStage || "list";
+    setVisualScriptStage(scriptStage);
+  }
+  if (elements.visualWorkbenchGrid) {
+    elements.visualWorkbenchGrid.dataset.visualCurrentMode = nextMode;
+  }
+  elements.visualModeTabs.forEach((tab) => {
+    const isActive = tab.dataset.visualMode === nextMode;
+    tab.classList.toggle("active", isActive);
+    tab.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  renderVisualSubjectPool();
+  renderVisualScriptList();
+  renderVisualScriptSubjects();
+}
+
+function setVisualScriptStage(stage) {
+  const nextStage = stage === "subjects" ? "subjects" : "list";
+  state.visualScriptStage = nextStage;
+  if (elements.visualWorkbenchGrid) {
+    elements.visualWorkbenchGrid.dataset.visualScriptStage = nextStage;
+  }
+}
+
+function showVisualScriptList() {
+  setVisualSubjectMode("scripts", { scriptStage: "list" });
 }
 
 async function extractVisualSubjectsFromScript() {
@@ -444,7 +657,9 @@ async function extractVisualSubjectsFromScript() {
     return;
   }
   elements.visualExtractButton.disabled = true;
-  setVisualStatus("正在解析主体：筛选需要跨镜头保持一致的角色、族群和群体...", "loading");
+  state.visualScriptStatuses[state.selectedVisualScriptId] = "parsing";
+  renderVisualScriptList();
+  setVisualStatus("解析中：筛选需要跨镜头保持一致的角色、人群、物种和核心视觉主体。", "loading");
   try {
     const response = await fetch("/api/visual/subjects/extract-from-script", {
       method: "POST",
@@ -457,11 +672,16 @@ async function extractVisualSubjectsFromScript() {
     }
     state.visualScriptSubjects = payload.subjects || [];
     state.visualRejectedCandidates = payload.rejected_candidates || [];
+    state.visualScriptStatuses[state.selectedVisualScriptId] = "parsed";
+    state.visualScriptSubjectCounts[state.selectedVisualScriptId] = payload.script_subject_count || state.visualScriptSubjects.length;
     renderVisualScriptSubjects(payload.generation);
     renderVisualRejectedCandidates();
     await loadVisualSubjects();
-    setVisualStatus(`解析完成：识别 ${payload.script_subject_count || 0} 个视觉主体。`, "success");
+    renderVisualScriptList();
+    setVisualStatus(`已解析：识别 ${payload.script_subject_count || 0} 个视觉主体。`, "success");
   } catch (error) {
+    state.visualScriptStatuses[state.selectedVisualScriptId] = "failed";
+    renderVisualScriptList();
     setVisualStatus(error.message, "error");
   } finally {
     elements.visualExtractButton.disabled = false;
@@ -484,6 +704,8 @@ async function uploadVisualScript() {
     state.selectedVisualScriptId = payload.generation.generation_id;
     state.visualScriptSubjects = payload.subjects || [];
     state.visualRejectedCandidates = payload.rejected_candidates || [];
+    state.visualScriptStatuses[state.selectedVisualScriptId] = "parsed";
+    state.visualScriptSubjectCounts[state.selectedVisualScriptId] = payload.script_subject_count || state.visualScriptSubjects.length;
     await loadScriptGenerations();
     await loadVisualSubjects();
     renderVisualScriptSubjects(payload.generation);
@@ -509,6 +731,9 @@ async function loadScriptVisualSubjects(generationId) {
     throw new Error(payload.error || "剧本主体读取失败");
   }
   state.visualScriptSubjects = payload.subjects || [];
+  state.visualScriptStatuses[generationId] = payload.status || (state.visualScriptSubjects.length ? "parsed" : "not_parsed");
+  state.visualScriptSubjectCounts[generationId] = state.visualScriptSubjects.length;
+  renderVisualScriptList();
   renderVisualScriptSubjects(payload.generation);
   renderVisualRejectedCandidates();
 }
@@ -517,40 +742,34 @@ function renderVisualScriptSubjects(generation = null) {
   if (!elements.visualScriptSubjects) return;
   const script = generation || currentVisualScript();
   if (!script) {
-    elements.visualScriptSubjects.innerHTML = '<div class="empty-record">暂无可查看的剧本。</div>';
+    elements.visualScriptSubjects.innerHTML = `
+      <div class="visual-empty-state compact">
+        <strong>未选择剧本</strong>
+        <span>从左侧选择一个剧本后查看它的主体解析结果。</span>
+      </div>
+    `;
     return;
   }
-  const subjects = state.visualScriptSubjects || [];
+  const subjects = sortVisualScriptSubjectsByImportance(state.visualScriptSubjects || []);
+  const status = visualScriptParseStatus(script.generation_id);
   const rows = subjects
-    .map((subject) => {
-      return `
-        <article class="visual-script-subject-row">
-          <button type="button" data-visual-subject="${escapeHtml(subject.subject_id)}">${escapeHtml(subject.canonical_name)}</button>
-          <span>${escapeHtml(subject.role_in_script || "")}</span>
-          <em>重要度 ${escapeHtml(String(subject.importance || 0))}</em>
-          <small>${escapeHtml(subject.first_appearance || "")}</small>
-          <strong>${subject.is_global_subject ? "已合并到全局主体池" : "未合并"}</strong>
-        </article>
-      `;
-    })
+    .map((subject) => renderVisualScriptSubjectItem(subject))
     .join("");
   elements.visualScriptSubjects.innerHTML = `
     <article class="visual-script-summary">
       <strong>${escapeHtml(script.script_title || script.topic || "")}</strong>
       <span>${escapeHtml(script.created_at || "")}</span>
-      <em>已识别主体 ${subjects.length} 个 · ${subjects.length ? "parsed" : "not_parsed"}</em>
+      <em>${escapeHtml(status === "parsed" ? `本剧本识别出 ${subjects.length} 个主体` : visualStatusLabel(status))}</em>
     </article>
-    ${rows || '<div class="empty-record">这个剧本还没有解析主体。</div>'}
+    ${rows || '<div class="visual-empty-state compact"><strong>还没有解析主体</strong><span>点击顶部“解析主体”后，这里会显示本剧本中的角色、人群和物种。</span></div>'}
   `;
-  elements.visualScriptSubjects.querySelectorAll("[data-visual-subject]").forEach((button) => {
-    button.addEventListener("click", () => showVisualSubjectDetail(button.dataset.visualSubject));
-  });
+  bindVisualSubjectActions(elements.visualScriptSubjects);
 }
 
 function renderVisualRejectedCandidates() {
   if (!elements.visualRejectedCandidates) return;
   if (!state.visualRejectedCandidates.length) {
-    elements.visualRejectedCandidates.innerHTML = '<span class="visual-empty-inline">暂无拒绝候选。</span>';
+    elements.visualRejectedCandidates.innerHTML = '<span class="visual-empty-inline">暂无被拒绝候选。</span>';
     return;
   }
   elements.visualRejectedCandidates.innerHTML = state.visualRejectedCandidates
@@ -558,97 +777,6 @@ function renderVisualRejectedCandidates() {
       return `<div class="visual-rejected-item"><strong>${escapeHtml(candidate.name)}</strong><span>${escapeHtml(candidate.reason)}</span></div>`;
     })
     .join("");
-}
-
-async function showVisualSubjectDetail(subjectId) {
-  if (!subjectId) return;
-  state.selectedVisualSubjectId = subjectId;
-  elements.visualSubjectDetail.innerHTML = '<div class="empty-record">正在读取主体详情...</div>';
-  const response = await fetch(`/api/visual/subjects/${encodeURIComponent(subjectId)}`);
-  const payload = await response.json();
-  if (!response.ok) {
-    elements.visualSubjectDetail.innerHTML = `<div class="empty-record">${escapeHtml(payload.error || "主体详情读取失败")}</div>`;
-    return;
-  }
-  renderVisualSubjectDetail(payload.subject);
-}
-
-function renderVisualSubjectDetail(subject) {
-  const identity = subject.visual_identity || {};
-  const rules = subject.consistency_rules || {};
-  const appearances = subject.appearances || [];
-  elements.visualAnchorButton.hidden = false;
-  elements.visualSubjectDetail.innerHTML = `
-    <article class="visual-detail-card">
-      <h3>${escapeHtml(subject.canonical_name || "")}</h3>
-      <dl class="visual-detail-grid">
-        <div><dt>类型</dt><dd>${escapeHtml(subject.subject_type || "")}</dd></div>
-        <div><dt>首字母</dt><dd>${escapeHtml(subject.first_letter || "")}</dd></div>
-        <div><dt>拼音排序 key</dt><dd>${escapeHtml(subject.pinyin_key || "")}</dd></div>
-        <div><dt>状态</dt><dd>${escapeHtml(subject.status || "")}</dd></div>
-      </dl>
-      <p>${escapeHtml(subject.short_description || "")}</p>
-      <h4>视觉身份</h4>
-      ${renderVisualIdentity(identity)}
-      <h4>一致性规则</h4>
-      ${renderVisualRules(rules)}
-      <h4>生成资产</h4>
-      <div class="visual-prompt-box">
-        <strong>visual_prompt</strong>
-        <p>${escapeHtml(subject.visual_prompt || "")}</p>
-        <strong>negative_prompt</strong>
-        <p>${escapeHtml(subject.negative_prompt || "")}</p>
-        <em>workflow_name: ${escapeHtml(subject.workflow_name || "")}</em>
-      </div>
-      <h4>出现过的剧本</h4>
-      <div class="visual-appearance-list">
-        ${appearances.map((appearance) => renderVisualAppearance(appearance)).join("") || '<div class="empty-record">暂无出现记录</div>'}
-      </div>
-    </article>
-  `;
-}
-
-function renderVisualIdentity(identity) {
-  const rows = [
-    ["时代", identity.era],
-    ["地区", identity.region],
-    ["外观", identity.appearance],
-    ["服饰", identity.clothing],
-    ["道具", (identity.props || []).join("、")],
-    ["身体语言", identity.body_language],
-    ["群体构成", identity.group_composition],
-  ];
-  return `<dl class="visual-detail-list">${rows.map(([label, value]) => `<div><dt>${label}</dt><dd>${escapeHtml(value || "")}</dd></div>`).join("")}</dl>`;
-}
-
-function renderVisualRules(rules) {
-  return `
-    <div class="visual-rule-grid">
-      <div><strong>must_keep</strong><ul>${(rules.must_keep || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>
-      <div><strong>avoid</strong><ul>${(rules.avoid || []).map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>
-    </div>
-  `;
-}
-
-function renderVisualAppearance(appearance) {
-  return `
-    <article class="visual-appearance-item">
-      <strong>${escapeHtml(appearance.topic || appearance.generation_id || "")}</strong>
-      <span>${escapeHtml(appearance.created_at || "")}</span>
-      <em>重要度 ${escapeHtml(String(appearance.importance || 0))}</em>
-      <p>${escapeHtml(appearance.role_in_script || "")}</p>
-      <small>${escapeHtml(appearance.first_appearance || "")}</small>
-    </article>
-  `;
-}
-
-async function requestVisualAnchor(subjectId = state.selectedVisualSubjectId) {
-  if (!subjectId) return;
-  const response = await fetch(`/api/visual/subjects/${encodeURIComponent(subjectId)}/anchor`, { method: "POST" });
-  const payload = await response.json();
-  const message = payload.message || "ComfyUI 图片生成接口尚未配置，后续将在这里生成主体锚点图。";
-  setVisualStatus(message, response.ok ? "success" : "error");
-  window.alert(message);
 }
 
 function setSceneBuilderTab(tabName) {
@@ -678,9 +806,11 @@ function currentVisualScript() {
 function updateVisualCurrentScript() {
   if (!elements.visualCurrentScript) return;
   const script = currentVisualScript();
-  elements.visualCurrentScript.textContent = script
-    ? `当前解析剧本：${script.script_title || script.topic || script.generation_id}`
-    : "当前解析剧本：未选择";
+  const title = script ? script.script_title || script.topic || script.generation_id : "未选择";
+  elements.visualCurrentScript.textContent = `当前剧本：${title}`;
+  if (elements.visualSelectedScriptTitle) {
+    elements.visualSelectedScriptTitle.textContent = title;
+  }
 }
 
 async function parseSelectedSource() {
@@ -1262,12 +1392,20 @@ elements.scriptViewerTabs.forEach((tab) => {
 elements.sceneModuleTabs.forEach((tab) => {
   tab.addEventListener("click", () => setSceneBuilderTab(tab.dataset.sceneTab));
 });
+elements.visualModeTabs.forEach((tab) => {
+  tab.addEventListener("click", () => setVisualSubjectMode(tab.dataset.visualMode));
+});
+elements.visualScriptBackButtons.forEach((button) => {
+  button.addEventListener("click", showVisualScriptList);
+});
 elements.visualUploadButton.addEventListener("click", () => elements.visualScriptFileInput.click());
 elements.visualScriptFileInput.addEventListener("change", uploadVisualScript);
 elements.visualScriptSelect.addEventListener("change", () => {
-  state.selectedVisualScriptId = elements.visualScriptSelect.value;
-  updateVisualCurrentScript();
-  loadScriptVisualSubjects(state.selectedVisualScriptId).catch((error) => setVisualStatus(error.message, "error"));
+  selectVisualScript(elements.visualScriptSelect.value);
+});
+elements.visualSubjectSearchInput.addEventListener("input", () => {
+  state.visualSubjectQuery = elements.visualSubjectSearchInput.value;
+  renderVisualSubjectPool();
 });
 elements.visualExtractButton.addEventListener("click", extractVisualSubjectsFromScript);
 elements.refreshVisualSubjectsButton.addEventListener("click", () => {
@@ -1276,17 +1414,19 @@ elements.refreshVisualSubjectsButton.addEventListener("click", () => {
 elements.refreshVisualScriptSubjectsButton.addEventListener("click", () => {
   loadScriptVisualSubjects(state.selectedVisualScriptId).catch((error) => setVisualStatus(error.message, "error"));
 });
-elements.visualAnchorButton.addEventListener("click", () => requestVisualAnchor());
 document.addEventListener("click", (event) => {
   if (!elements.timelinePicker.contains(event.target) && !elements.timelinePopover.hidden) {
     closeTimelinePicker();
   }
 });
+window.addEventListener("hashchange", applyHashView);
 ["input", "change"].forEach((eventName) => {
   elements.scriptTopicInput.addEventListener(eventName, updateScriptHint);
   elements.scriptStartYearInput.addEventListener(eventName, updateScriptHint);
   elements.scriptEndYearInput.addEventListener(eventName, updateScriptHint);
 });
+
+applyHashView();
 
 Promise.all([loadSources(), loadRecords(), loadScriptGenerations()]).catch((error) => {
   setCommandState("error", error.message);

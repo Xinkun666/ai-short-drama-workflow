@@ -156,47 +156,74 @@
           </div>
 
           <section class="scene-module-panel active" data-scene-panel="subjects">
-            <div class="visual-subject-controls">
+            <div class="visual-subject-toolbar">
+              <div class="visual-subject-title">
+                <h2>主体池</h2>
+                <div class="visual-mode-tabs" aria-label="主体池查看方式">
+                  <button class="visual-mode-tab active" type="button" data-visual-mode="all">所有主体</button>
+                  <button class="visual-mode-tab" type="button" data-visual-mode="scripts">剧本主体</button>
+                </div>
+              </div>
               <input id="visualScriptFileInput" type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" hidden>
-              <button class="command-button secondary" id="visualUploadButton" type="button">上传剧本</button>
-              <label class="visual-select-field" for="visualScriptSelect">
-                <span>选择已有剧本</span>
-                <select id="visualScriptSelect"></select>
-              </label>
-              <button class="command-button primary" id="visualExtractButton" type="button">开始解析</button>
-              <div class="visual-status" id="visualStatus">请选择已有剧本或上传剧本后开始解析。</div>
-              <div class="visual-current-script" id="visualCurrentScript">当前解析剧本：未选择</div>
+              <div class="visual-toolbar-controls">
+                <label class="visual-select-field" for="visualScriptSelect">
+                  <span>选择已有剧本</span>
+                  <select id="visualScriptSelect"></select>
+                </label>
+                <button class="visual-button primary" id="visualExtractButton" type="button">解析主体</button>
+                <button class="visual-button secondary" id="visualUploadButton" type="button">上传剧本</button>
+              </div>
+              <div class="visual-toolbar-footer">
+                <div class="visual-status" id="visualStatus">请选择已有剧本或上传剧本后开始解析。</div>
+                <div class="visual-current-script" id="visualCurrentScript">当前剧本：未选择</div>
+              </div>
             </div>
 
-            <div class="visual-subject-workspace">
-              <section class="visual-subject-pool" aria-label="全局主体池">
-                <div class="records-header">
-                  <span>全局主体池</span>
+            <div class="visual-workbench-grid" id="visualWorkbenchGrid" data-visual-current-mode="all" data-visual-script-stage="list">
+              <section class="visual-workbench-panel visual-script-panel" aria-label="剧本列表">
+                <div class="visual-panel-head">
+                  <div>
+                    <span>剧本主体</span>
+                    <small>逐个查看剧本，并进入该剧本的主体清单</small>
+                  </div>
+                </div>
+                <div id="visualScriptList" class="visual-script-list"></div>
+              </section>
+
+              <section class="visual-workbench-panel visual-subject-pool" aria-label="全局主体池">
+                <div class="visual-panel-head">
+                  <div>
+                    <span>全局主体池</span>
+                    <small>按拼音首字母分组管理视觉主体</small>
+                  </div>
                   <button class="text-button" id="refreshVisualSubjectsButton" type="button">刷新</button>
                 </div>
+                <label class="visual-search-box" for="visualSubjectSearchInput">
+                  <input id="visualSubjectSearchInput" type="search" placeholder="搜索主体，例如：智人、尼安德特人" autocomplete="off">
+                </label>
                 <div id="visualSubjectPool" class="visual-subject-group-list"></div>
               </section>
 
-              <section class="visual-script-subjects" aria-label="按剧本查看主体">
-                <div class="records-header">
-                  <span>按剧本查看</span>
-                  <button class="text-button" id="refreshVisualScriptSubjectsButton" type="button">读取</button>
+              <section class="visual-workbench-panel visual-script-subjects" aria-label="当前剧本主体">
+                <div class="visual-panel-head">
+                  <div>
+                    <span>当前剧本主体</span>
+                    <small id="visualSelectedScriptTitle">未选择剧本</small>
+                  </div>
+                  <div class="visual-panel-actions">
+                    <button class="text-button" type="button" data-visual-script-back>返回剧本列表</button>
+                    <button class="text-button" id="refreshVisualScriptSubjectsButton" type="button">刷新</button>
+                  </div>
                 </div>
                 <div id="visualScriptSubjects" class="visual-script-subject-list"></div>
                 <div class="visual-rejected-box">
-                  <strong>被拒绝候选</strong>
+                  <button class="visual-rejected-toggle" type="button" aria-expanded="true">被拒绝候选</button>
                   <div id="visualRejectedCandidates"></div>
                 </div>
               </section>
 
-              <section class="visual-subject-detail" aria-label="主体详情">
-                <div class="records-header">
-                  <span>主体详情</span>
-                  <button class="text-button" id="visualAnchorButton" type="button" hidden>生成主体锚点图</button>
-                </div>
-                <div id="visualSubjectDetail" class="visual-subject-detail-body">点击主体卡片后查看视觉身份、一致性规则和出现剧本。</div>
-              </section>
             </div>
+
           </section>
 
           <section class="scene-module-panel" data-scene-panel="scenes" hidden>

@@ -18,6 +18,8 @@ from drama_agents.script_assistant import ScriptAssistantController
 from drama_agents.storage import MaterialDatabase
 from drama_agents.timeline_builder import TimelineBuilder, result_to_payload as timeline_result_to_payload
 from drama_agents.vector_store import LocalVectorStore, build_material_chunks
+from drama_agents.visual_anchor_agent import VisualAnchorAgent
+from drama_agents.visual_anchor_agent import build_subject_anchor_negative_prompt, build_subject_anchor_prompt
 from drama_agents.visual_subject_agent import VisualSubjectAgent
 
 
@@ -32,6 +34,7 @@ def create_app(
     timeline_provider=ENV_PROVIDER,
     script_provider=ENV_PROVIDER,
     subject_provider=ENV_PROVIDER,
+    anchor_provider=ENV_PROVIDER,
 ) -> Flask:
     package_dir = Path(__file__).parent
     app = Flask(
@@ -46,6 +49,7 @@ def create_app(
     script_outputs_path = outputs_path / "script_generations"
     map_data_path = package_dir.parents[1] / "data" / "natural_earth"
     map_outputs_path = outputs_path / "maps"
+    visual_anchor_outputs_path = outputs_path / "visual_subject_anchors"
     records_path = outputs_path / "material_records.json"
     database_path = outputs_path / "material_workstation.sqlite3"
     rag_database_path = outputs_path / "material_rag.sqlite3"
@@ -60,10 +64,16 @@ def create_app(
         if subject_provider is ENV_PROVIDER
         else VisualSubjectAgent(subject_provider)
     )
+    visual_anchor_agent = (
+        VisualAnchorAgent.from_environment()
+        if anchor_provider is ENV_PROVIDER
+        else VisualAnchorAgent(anchor_provider)
+    )
     upload_path.mkdir(parents=True, exist_ok=True)
     output_splits_path.mkdir(parents=True, exist_ok=True)
     script_outputs_path.mkdir(parents=True, exist_ok=True)
     map_outputs_path.mkdir(parents=True, exist_ok=True)
+    visual_anchor_outputs_path.mkdir(parents=True, exist_ok=True)
 
     app.config["WORKSPACE"] = workspace_path
     app.config["OUTPUTS"] = outputs_path
@@ -72,6 +82,7 @@ def create_app(
     app.config["SCRIPT_GENERATIONS"] = script_outputs_path
     app.config["MAP_DATA"] = map_data_path
     app.config["MAP_OUTPUTS"] = map_outputs_path
+    app.config["VISUAL_ANCHOR_OUTPUTS"] = visual_anchor_outputs_path
     app.config["MATERIAL_RECORDS"] = records_path
     app.config["MATERIAL_DATABASE"] = database_path
     app.config["RAG_DATABASE"] = rag_database_path
@@ -313,15 +324,64 @@ def create_app(
             abort(404)
         return jsonify({"subject": subject})
 
-    @app.route("/api/visual/subjects/<subject_id>/anchor", methods=["POST"])
-    def create_visual_subject_anchor(subject_id: str):
-        if not MaterialDatabase(database_path).find_visual_subject(subject_id):
+    @app.route("/visual/subjects/<subject_id>", methods=["GET"])
+    def visual_subject_detail_page(subject_id: str):
+        database = MaterialDatabase(database_path)
+        subject = database.find_visual_subject(subject_id)
+        if not subject:
+            abort(404)
+        return render_template("visual_subject_detail.html", subject=subject)
+
+    @app.route("/api/visual/subjects/<subject_id>/anchor-prompt", methods=["GET"])
+    def visual_subject_anchor_prompt(subject_id: str):
+        database = MaterialDatabase(database_path)
+        subject = database.find_visual_subject(subject_id)
+        if not subject:
             abort(404)
         return jsonify(
             {
                 "subject_id": subject_id,
-                "status": "not_configured",
-                "message": "ComfyUI 图片生成接口尚未配置，后续将在这里生成主体锚点图。",
+                "prompt": build_subject_anchor_prompt(subject),
+                "negative_prompt": build_subject_anchor_negative_prompt(subject),
+            }
+        )
+
+    @app.route("/api/visual/subjects/<subject_id>/anchor", methods=["POST"])
+    def create_visual_subject_anchor(subject_id: str):
+        database = MaterialDatabase(database_path)
+        subject = database.find_visual_subject(subject_id)
+        if not subject:
+            abort(404)
+        payload = request.get_json(silent=True) or {}
+        try:
+            anchor = visual_anchor_agent.generate_subject_anchor(
+                subject=subject,
+                output_dir=visual_anchor_outputs_path,
+                prompt=payload.get("prompt"),
+                negative_prompt=payload.get("negative_prompt") if "negative_prompt" in payload else None,
+            )
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        asset_url = output_link(Path(anchor["asset_path"]), outputs_path)
+        subject = database.update_visual_subject(
+            subject_id,
+            {
+                "anchor_asset_id": asset_url,
+                "visual_prompt": anchor["prompt"],
+                "negative_prompt": anchor["negative_prompt"],
+                "workflow_name": anchor["workflow_name"],
+                "status": "anchor_ready",
+            },
+        )
+        return jsonify(
+            {
+                "subject_id": subject_id,
+                "status": "completed",
+                "provider": anchor["provider"],
+                "model": anchor["model"],
+                "asset_url": asset_url,
+                "subject": subject,
+                "message": "主体锚点图已生成，并已写入主体资产记录。",
             }
         )
 

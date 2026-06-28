@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ subject.canonical_name }} - 主体详情</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260628b">
+  </head>
+  <body>
+    <main class="script-page-shell visual-subject-page" data-visual-subject-page="{{ subject.subject_id }}">
+      <header class="script-page-hero">
+        <div>
+          <a class="back-link" href="/#scene">返回主体池</a>
+          <div class="eyebrow">主体详情</div>
+          <h1>{{ subject.canonical_name }}</h1>
+          <p>{{ subject.short_description }}</p>
+        </div>
+        <div class="script-page-meta">
+          <span>{{ subject.subject_type }}</span>
+          <span>{% if subject.has_anchor_asset %}已生成锚点图{% else %}未生成锚点图{% endif %}</span>
+        </div>
+      </header>
+
+      <section class="visual-detail-card visual-subject-page-card">
+        <div class="visual-detail-title">
+          <h3>{{ subject.canonical_name }}</h3>
+          <span>{{ subject.subject_type }}</span>
+        </div>
+
+        <div class="visual-detail-section">
+          <h4>基本信息</h4>
+          <dl class="visual-detail-grid">
+            <div><dt>名称</dt><dd>{{ subject.canonical_name }}</dd></div>
+            <div><dt>类型</dt><dd>{{ subject.subject_type }}</dd></div>
+            <div><dt>拼音排序 key</dt><dd>{{ subject.pinyin_key }}</dd></div>
+            <div><dt>描述</dt><dd>{{ subject.short_description }}</dd></div>
+          </dl>
+        </div>
+
+        <div class="visual-detail-section">
+          <h4>视觉身份</h4>
+          {% set identity = subject.visual_identity or {} %}
+          <dl class="visual-detail-list">
+            <div><dt>时代</dt><dd>{{ identity.era or "" }}</dd></div>
+            <div><dt>地区</dt><dd>{{ identity.region or "" }}</dd></div>
+            <div><dt>外观</dt><dd>{{ identity.appearance or "" }}</dd></div>
+            <div><dt>服饰</dt><dd>{{ identity.clothing or "" }}</dd></div>
+            <div><dt>道具</dt><dd>{{ (identity.props or [])|join("、") }}</dd></div>
+            <div><dt>身体语言</dt><dd>{{ identity.body_language or "" }}</dd></div>
+            <div><dt>群体构成</dt><dd>{{ identity.group_composition or "" }}</dd></div>
+          </dl>
+        </div>
+
+        <div class="visual-detail-section">
+          <h4>一致性规则</h4>
+          {% set rules = subject.consistency_rules or {} %}
+          <div class="visual-rule-grid">
+            <div>
+              <strong>必须保持</strong>
+              <ul>
+                {% for item in rules.must_keep or [] %}
+                  <li>{{ item }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+            <div>
+              <strong>避免出现</strong>
+              <ul>
+                {% for item in rules.avoid or [] %}
+                  <li>{{ item }}</li>
+                {% endfor %}
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="visual-detail-section">
+          <h4>主体图构建</h4>
+          <div class="visual-build-grid">
+            <section class="visual-build-panel">
+              <div>
+                <strong>获取提示词</strong>
+                <span>生成前可直接修改 Prompt</span>
+              </div>
+              <button
+                class="visual-button secondary small"
+                type="button"
+                data-subject-prompt-api="/api/visual/subjects/{{ subject.subject_id }}/anchor-prompt"
+              >获取提示词</button>
+              <textarea
+                class="visual-prompt-textarea"
+                data-subject-prompt-textarea
+                placeholder="点击“获取提示词”后，这里会出现根据主体内容和卡通风格生成的图片 Prompt。"
+              >{{ subject.visual_prompt or "" }}</textarea>
+              <div class="visual-status" data-subject-prompt-status></div>
+            </section>
+
+            <section class="visual-build-panel">
+              <div>
+                <strong>生成主体图</strong>
+                <span>{% if subject.has_anchor_asset %}已生成主体图{% else %}未生成主体图{% endif %}</span>
+              </div>
+              {% if subject.anchor_asset_id %}
+                <img class="visual-anchor-preview" src="{{ subject.anchor_asset_id }}" alt="{{ subject.canonical_name }}主体图">
+              {% endif %}
+              <p>使用左侧当前 Prompt 生成当前主体的单一参考图，不生成群像、地图场景或信息图。</p>
+              <button
+                class="visual-button primary small"
+                type="button"
+                data-visual-anchor-api="/api/visual/subjects/{{ subject.subject_id }}/anchor"
+              >生成主体图</button>
+              <div class="visual-status" data-visual-anchor-status></div>
+            </section>
+          </div>
+        </div>
+
+        <div class="visual-detail-section">
+          <h4>出现过的剧本</h4>
+          <div class="visual-appearance-list">
+            {% for appearance in subject.appearances or [] %}
+              <article class="visual-appearance-item">
+                <strong>{{ appearance.topic or appearance.generation_id }}</strong>
+                <span>{{ appearance.created_at }}</span>
+                <em>重要度 {{ appearance.importance or 0 }}</em>
+                <p>{{ appearance.role_in_script }}</p>
+                <small>{{ appearance.first_appearance }}</small>
+              </article>
+            {% else %}
+              <div class="visual-empty-state compact">暂无出现记录</div>
+            {% endfor %}
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const promptButton = document.querySelector("[data-subject-prompt-api]");
+      const promptTextarea = document.querySelector("[data-subject-prompt-textarea]");
+      const promptStatus = document.querySelector("[data-subject-prompt-status]");
+      const anchorButton = document.querySelector("[data-visual-anchor-api]");
+      const anchorStatus = document.querySelector("[data-visual-anchor-status]");
+      if (promptButton) {
+        promptButton.addEventListener("click", async () => {
+          promptButton.disabled = true;
+          promptStatus.textContent = "正在获取提示词...";
+          promptStatus.dataset.status = "loading";
+          const response = await fetch(promptButton.dataset.subjectPromptApi);
+          const payload = await response.json().catch(() => ({}));
+          promptButton.disabled = false;
+          if (response.ok) {
+            promptTextarea.value = payload.prompt || "";
+            promptStatus.textContent = "已获取提示词，可直接编辑后生成主体图。";
+            promptStatus.dataset.status = "success";
+            return;
+          }
+          promptStatus.textContent = payload.error || "提示词获取失败";
+          promptStatus.dataset.status = "error";
+        });
+      }
+      if (anchorButton) {
+        anchorButton.addEventListener("click", async () => {
+          const prompt = (promptTextarea ? promptTextarea.value : "").trim();
+          if (!prompt) {
+            anchorStatus.textContent = "请先获取或填写提示词。";
+            anchorStatus.dataset.status = "error";
+            return;
+          }
+          anchorButton.disabled = true;
+          anchorStatus.textContent = "正在生成主体图...";
+          anchorStatus.dataset.status = "loading";
+          const response = await fetch(anchorButton.dataset.visualAnchorApi, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (response.ok) {
+            anchorStatus.textContent = payload.message || "主体图已生成。";
+            anchorStatus.dataset.status = "success";
+            window.location.reload();
+            return;
+          }
+          anchorButton.disabled = false;
+          anchorStatus.textContent = payload.error || "主体图生成失败";
+          anchorStatus.dataset.status = "error";
+        });
+      }
+    </script>
+  </body>
+</html>

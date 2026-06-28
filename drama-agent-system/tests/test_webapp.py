@@ -7,6 +7,7 @@ from pypdf import PdfWriter
 
 from drama_agents.storage import MaterialDatabase
 from drama_agents.vector_store import LocalVectorStore
+from drama_agents.visual_subject_agent import RuleBasedVisualSubjectProvider
 from drama_agents.webapp.app import create_app
 
 
@@ -192,6 +193,20 @@ class FakeScriptProvider:
         }
 
 
+class FakeVisualAnchorProvider:
+    def __init__(self):
+        self.calls = []
+
+    def generate_image(self, *, prompt, negative_prompt):
+        self.calls.append({"prompt": prompt, "negative_prompt": negative_prompt})
+        return {
+            "image_bytes": b"fake-anchor-image",
+            "mime_type": "image/png",
+            "model": "fake-seeddream",
+            "provider": "ark",
+        }
+
+
 class PlanningScriptProvider(FakeScriptProvider):
     def __init__(self, plan):
         super().__init__()
@@ -246,9 +261,141 @@ def test_homepage_renders_scene_builder_workspace(tmp_path):
     assert "场景池" in html
     assert "剧本分镜" in html
     assert "选择已有剧本" in html
-    assert "开始解析" in html
+    assert "解析主体" in html
     assert "用于管理东非草原、黎凡特地区、布隆伯斯洞穴" in html
     assert "用于把剧本拆成镜头卡" in html
+
+
+def test_subject_pool_renders_asset_workbench_layout(tmp_path):
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", refiner_provider=FakeDeepSeekProvider())
+    client = app.test_client()
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "visual-subject-toolbar" in html
+    assert "visual-mode-tabs" in html
+    assert 'data-visual-mode="all">所有主体' in html
+    assert 'data-visual-mode="scripts">剧本主体' in html
+    assert "visual-workbench-grid" in html
+    assert "visual-script-list" in html
+    assert "visualSubjectSearchInput" in html
+    assert "搜索主体，例如：智人、尼安德特人" in html
+    assert "当前剧本主体" in html
+    assert "解析主体" in html
+    assert 'id="visualExtractButton" type="button">解析主体' in html
+    assert 'id="visualExtractButton" type="button">开始解析' not in html
+    assert 'aria-label="主体详情"' not in html
+    assert 'id="visualAnchorButton"' not in html
+    assert "请选择一个主体查看视觉身份、一致性规则和锚点图生成状态。" not in html
+    assert "识别并管理短剧中需要保持视觉一致的主体，为后续图片和视频生成做准备。" not in html
+
+
+def test_subject_pool_frontend_links_to_dedicated_detail_page_before_anchor_generation():
+    app_js = (Path(__file__).parents[1] / "drama_agents" / "webapp" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'href="${visualSubjectDetailUrl(subject.subject_id)}">详情</a>' in app_js
+    assert "function visualSubjectDetailUrl" in app_js
+    assert "function renderVisualSubjectInlineDetail" not in app_js
+    assert "function showVisualSubjectDetail" not in app_js
+    assert "selectedVisualSubjectDetail" not in app_js
+    assert 'data-visual-anchor="${escapeHtml(subject.subject_id)}">生成锚点图</button>' not in app_js
+    assert 'visualSubjectDetail: document.querySelector("#visualSubjectDetail")' not in app_js
+
+
+def test_subject_pool_frontend_maps_status_to_chinese():
+    app_js = (Path(__file__).parents[1] / "drama_agents" / "webapp" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "function visualStatusLabel" in app_js
+    assert "not_parsed" in app_js
+    assert "未解析" in app_js
+    assert "parsing" in app_js
+    assert "解析中" in app_js
+    assert "parsed" in app_js
+    assert "已解析" in app_js
+    assert "failed" in app_js
+    assert "解析失败" in app_js
+    assert 'subjects.length ? "parsed" : "not_parsed"' not in app_js
+
+
+def test_subject_pool_frontend_has_two_display_modes():
+    app_js = (Path(__file__).parents[1] / "drama_agents" / "webapp" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "visualMode: \"all\"" in app_js
+    assert "function setVisualSubjectMode" in app_js
+    assert "data-visual-mode" in app_js
+    assert "visual-script-open" in app_js
+    assert ">主体</button>" in app_js
+
+
+def test_script_subject_frontend_drills_into_sorted_subject_rows():
+    app_js = (Path(__file__).parents[1] / "drama_agents" / "webapp" / "static" / "app.js").read_text(
+        encoding="utf-8"
+    )
+    styles_css = (Path(__file__).parents[1] / "drama_agents" / "webapp" / "static" / "styles.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'visualScriptStage: "list"' in app_js
+    assert "function setVisualScriptStage" in app_js
+    assert "function showVisualScriptList" in app_js
+    assert "function sortVisualScriptSubjectsByImportance" in app_js
+    assert "sortVisualScriptSubjectsByImportance(state.visualScriptSubjects || [])" in app_js
+    assert 'data-visual-script-back' in app_js
+    assert 'href="${visualSubjectDetailUrl(subject.subject_id)}">详情</a>' in app_js
+    assert 'dataset.visualScriptStage = nextStage' in app_js
+    assert 'data-visual-script-stage="list"' in styles_css
+    assert 'data-visual-script-stage="subjects"' in styles_css
+    assert 'grid-template-columns: minmax(0, 1fr);' in styles_css
+
+
+def test_visual_subject_detail_page_renders_subject_and_anchor_action(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    extraction = client.post(
+        "/api/visual/subjects/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    sapiens = next(subject for subject in extraction["subjects"] if subject["canonical_name"] == "智人")
+
+    response = client.get(f"/visual/subjects/{sapiens['subject_id']}")
+
+    assert response.status_code == 200
+    html = response.get_data(as_text=True)
+    assert "主体详情" in html
+    assert "智人" in html
+    assert "视觉身份" in html
+    assert "一致性规则" in html
+    assert "主体图构建" in html
+    assert "获取提示词" in html
+    assert "生成主体图" in html
+    assert "data-subject-prompt-textarea" in html
+    assert f"/api/visual/subjects/{sapiens['subject_id']}/anchor" in html
+
+
+def test_visual_subject_prompt_api_returns_default_cartoon_prompt(tmp_path):
+    _app, client, generation = app_with_generated_script(tmp_path)
+    extraction = client.post(
+        "/api/visual/subjects/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    sapiens = next(subject for subject in extraction["subjects"] if subject["canonical_name"] == "智人")
+
+    response = client.get(f"/api/visual/subjects/{sapiens['subject_id']}/anchor-prompt")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["subject_id"] == sapiens["subject_id"]
+    assert "智人" in payload["prompt"]
+    assert "历史科普卡通短剧" in payload["prompt"]
+    assert "只生成一个主体" in payload["prompt"]
+    assert "不要多个主体" in payload["negative_prompt"]
 
 
 def test_sources_api_lists_workspace_pdfs(tmp_path):
@@ -534,6 +681,7 @@ def test_script_generate_api_returns_script_only_with_deferred_subjects_and_map_
         refiner_provider=FakeDeepSeekProvider(),
         timeline_provider=FakeTimelineProvider(),
         script_provider=FakeScriptProvider(),
+        subject_provider=RuleBasedVisualSubjectProvider(),
     )
     client = app.test_client()
     client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
@@ -569,6 +717,7 @@ def test_script_generate_api_accepts_numeric_year_inputs(tmp_path):
         refiner_provider=FakeDeepSeekProvider(),
         timeline_provider=FakeTimelineProvider(),
         script_provider=FakeScriptProvider(),
+        subject_provider=RuleBasedVisualSubjectProvider(),
     )
     client = app.test_client()
     client.post("/api/parse", json={"relative_path": "资料库/demo.pdf"})
@@ -729,6 +878,7 @@ def app_with_generated_script(tmp_path):
         refiner_provider=FakeDeepSeekProvider(),
         timeline_provider=FakeTimelineProvider(),
         script_provider=FakeScriptProvider(),
+        subject_provider=RuleBasedVisualSubjectProvider(),
     )
     client = app.test_client()
     generation = create_generated_script(client)
@@ -832,6 +982,121 @@ def test_subject_detail_contains_visual_identity(tmp_path):
     assert detail["visual_prompt"]
     assert detail["negative_prompt"]
     assert detail["appearances"][0]["generation_id"] == generation["generation_id"]
+
+
+def test_subject_anchor_generation_uses_cartoon_style_and_saves_asset(tmp_path):
+    provider = FakeVisualAnchorProvider()
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+        subject_provider=RuleBasedVisualSubjectProvider(),
+        anchor_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    extraction = client.post(
+        "/api/visual/subjects/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    sapiens = next(subject for subject in extraction["subjects"] if subject["canonical_name"] == "智人")
+
+    response = client.post(f"/api/visual/subjects/{sapiens['subject_id']}/anchor")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "completed"
+    assert payload["provider"] == "ark"
+    assert payload["model"] == "fake-seeddream"
+    assert payload["asset_url"].startswith("/outputs/visual_subject_anchors/")
+    assert (tmp_path / "outputs" / payload["asset_url"].removeprefix("/outputs/")).read_bytes() == b"fake-anchor-image"
+
+    prompt = provider.calls[0]["prompt"]
+    assert "智人" in prompt
+    assert "历史科普卡通短剧" in prompt
+    assert "半扁平卡通人物" in prompt
+    assert "只生成一个主体" in prompt
+    assert "纯主体参考图" in prompt
+    assert "干净纯色" in prompt
+    assert "3-6 个代表性人物" not in prompt
+    assert "地图+人物+场景" not in prompt
+    assert "不要多人群像" in provider.calls[0]["negative_prompt"]
+    assert "不要多个主体" in provider.calls[0]["negative_prompt"]
+    assert "不要地图背景" in provider.calls[0]["negative_prompt"]
+    assert "不要信息图文字" in provider.calls[0]["negative_prompt"]
+    assert "不要太幼稚" in provider.calls[0]["negative_prompt"]
+
+    detail = client.get(f"/api/visual/subjects/{sapiens['subject_id']}").get_json()["subject"]
+    assert detail["has_anchor_asset"] is True
+    assert detail["anchor_asset_id"] == payload["asset_url"]
+    assert detail["workflow_name"] == "ark_seeddream_subject_anchor_v1"
+
+
+def test_subject_anchor_generation_accepts_edited_prompt(tmp_path):
+    provider = FakeVisualAnchorProvider()
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+        subject_provider=RuleBasedVisualSubjectProvider(),
+        anchor_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    extraction = client.post(
+        "/api/visual/subjects/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    sapiens = next(subject for subject in extraction["subjects"] if subject["canonical_name"] == "智人")
+
+    response = client.post(
+        f"/api/visual/subjects/{sapiens['subject_id']}/anchor",
+        json={"prompt": "用户修改后的主体图 Prompt", "negative_prompt": "不要多人"},
+    )
+
+    assert response.status_code == 200
+    assert provider.calls[0]["prompt"] == "用户修改后的主体图 Prompt"
+    assert provider.calls[0]["negative_prompt"] == "不要多人"
+    detail = client.get(f"/api/visual/subjects/{sapiens['subject_id']}").get_json()["subject"]
+    assert detail["visual_prompt"] == "用户修改后的主体图 Prompt"
+    assert detail["negative_prompt"] == "不要多人"
+
+
+def test_subject_anchor_generation_reports_missing_ark_configuration(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+        subject_provider=RuleBasedVisualSubjectProvider(),
+        anchor_provider=None,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    extraction = client.post(
+        "/api/visual/subjects/extract-from-script",
+        json={"generation_id": generation["generation_id"]},
+    ).get_json()
+    sapiens = next(subject for subject in extraction["subjects"] if subject["canonical_name"] == "智人")
+
+    response = client.post(f"/api/visual/subjects/{sapiens['subject_id']}/anchor")
+
+    assert response.status_code == 500
+    assert "ARK_API_KEY" in response.get_json()["error"]
 
 
 def test_rejected_candidates_are_saved_or_returned(tmp_path):
