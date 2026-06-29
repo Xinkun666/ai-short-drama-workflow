@@ -271,6 +271,57 @@ class MaterialDatabase:
                     FOREIGN KEY (scene_id) REFERENCES visual_scenes(scene_id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS storyboards (
+                    storyboard_id TEXT PRIMARY KEY,
+                    generation_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT '',
+                    source_type TEXT NOT NULL DEFAULT 'script_generation',
+                    source_filename TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    target_duration_sec INTEGER NOT NULL DEFAULT 0,
+                    actual_duration_sec REAL,
+                    shot_count INTEGER NOT NULL DEFAULT 0,
+                    style_policy_json TEXT NOT NULL DEFAULT '{}',
+                    missing_subject_candidates_json TEXT NOT NULL DEFAULT '[]',
+                    missing_scene_candidates_json TEXT NOT NULL DEFAULT '[]',
+                    review_notes_json TEXT NOT NULL DEFAULT '[]',
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (generation_id) REFERENCES script_generations(generation_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS storyboard_shots (
+                    shot_id TEXT PRIMARY KEY,
+                    storyboard_id TEXT NOT NULL,
+                    generation_id TEXT NOT NULL,
+                    shot_index INTEGER NOT NULL,
+                    narration TEXT NOT NULL DEFAULT '',
+                    subtitle_text TEXT NOT NULL DEFAULT '',
+                    shot_type TEXT NOT NULL DEFAULT '',
+                    visual_goal TEXT NOT NULL DEFAULT '',
+                    scene_id TEXT NOT NULL DEFAULT '',
+                    scene_name TEXT NOT NULL DEFAULT '',
+                    subject_ids_json TEXT NOT NULL DEFAULT '[]',
+                    subject_names_json TEXT NOT NULL DEFAULT '[]',
+                    visual_elements_json TEXT NOT NULL DEFAULT '[]',
+                    reference_assets_json TEXT NOT NULL DEFAULT '{}',
+                    camera_json TEXT NOT NULL DEFAULT '{}',
+                    duration_sec REAL NOT NULL DEFAULT 4,
+                    keyframe_prompt TEXT NOT NULL DEFAULT '',
+                    video_prompt TEXT NOT NULL DEFAULT '',
+                    negative_prompt TEXT NOT NULL DEFAULT '',
+                    fact_safety_note TEXT NOT NULL DEFAULT '',
+                    asset_status TEXT NOT NULL DEFAULT 'missing_keyframe',
+                    keyframe_asset_id TEXT NOT NULL DEFAULT '',
+                    video_asset_id TEXT NOT NULL DEFAULT '',
+                    needs_manual_review INTEGER NOT NULL DEFAULT 0,
+                    raw_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (storyboard_id) REFERENCES storyboards(storyboard_id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_material_chapters_record
                     ON material_chapters(record_id, chapter_id);
                 CREATE INDEX IF NOT EXISTS idx_timeline_events_record
@@ -291,6 +342,10 @@ class MaterialDatabase:
                     ON visual_scenes(first_letter, pinyin_key, canonical_name);
                 CREATE INDEX IF NOT EXISTS idx_script_visual_scenes_generation
                     ON script_visual_scenes(generation_id, importance DESC, scene_id);
+                CREATE INDEX IF NOT EXISTS idx_storyboards_generation
+                    ON storyboards(generation_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_storyboard_shots_storyboard
+                    ON storyboard_shots(storyboard_id, shot_index);
                 """
             )
             ensure_table_columns(
@@ -627,6 +682,249 @@ class MaterialDatabase:
         updated = self.find_script_generation(generation_id)
         if not updated:
             raise KeyError(generation_id)
+        return updated
+
+    def save_storyboard(self, generation_id: str, storyboard_payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.find_script_generation(generation_id):
+            raise KeyError(generation_id)
+        payload = dict(storyboard_payload or {})
+        storyboard_id = str(payload.get("storyboard_id") or f"sb-{uuid4().hex}")
+        shots = [
+            normalize_storyboard_shot_payload(shot, generation_id=generation_id, storyboard_id=storyboard_id, index=index)
+            for index, shot in enumerate(payload.get("shots") or [], start=1)
+            if isinstance(shot, dict)
+        ]
+        actual_duration = sum(float(shot["duration_sec"]) for shot in shots)
+        target_duration = safe_int(payload.get("target_duration_sec"), default=0)
+        status = str(payload.get("status") or ("needs_review" if any(shot["needs_manual_review"] for shot in shots) else "completed"))
+        normalized = {
+            "storyboard_id": storyboard_id,
+            "generation_id": generation_id,
+            "title": str(payload.get("title") or "剧本分镜"),
+            "source_type": str(payload.get("source_type") or "script_generation"),
+            "source_filename": str(payload.get("source_filename") or ""),
+            "status": status,
+            "target_duration_sec": target_duration if target_duration > 0 else round(actual_duration),
+            "actual_duration_sec": actual_duration,
+            "shot_count": len(shots),
+            "style_policy": payload.get("style_policy") if isinstance(payload.get("style_policy"), dict) else {},
+            "missing_subject_candidates": payload.get("missing_subject_candidates") if isinstance(payload.get("missing_subject_candidates"), list) else [],
+            "missing_scene_candidates": payload.get("missing_scene_candidates") if isinstance(payload.get("missing_scene_candidates"), list) else [],
+            "review_notes": payload.get("review_notes") if isinstance(payload.get("review_notes"), list) else [],
+            "raw": payload.get("raw") if isinstance(payload.get("raw"), dict) else payload,
+        }
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO storyboards (
+                    storyboard_id, generation_id, title, source_type, source_filename,
+                    status, target_duration_sec, actual_duration_sec, shot_count,
+                    style_policy_json, missing_subject_candidates_json,
+                    missing_scene_candidates_json, review_notes_json, raw_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(storyboard_id) DO UPDATE SET
+                    generation_id=excluded.generation_id,
+                    title=excluded.title,
+                    source_type=excluded.source_type,
+                    source_filename=excluded.source_filename,
+                    status=excluded.status,
+                    target_duration_sec=excluded.target_duration_sec,
+                    actual_duration_sec=excluded.actual_duration_sec,
+                    shot_count=excluded.shot_count,
+                    style_policy_json=excluded.style_policy_json,
+                    missing_subject_candidates_json=excluded.missing_subject_candidates_json,
+                    missing_scene_candidates_json=excluded.missing_scene_candidates_json,
+                    review_notes_json=excluded.review_notes_json,
+                    raw_json=excluded.raw_json,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                storyboard_values(normalized),
+            )
+            connection.execute("DELETE FROM storyboard_shots WHERE storyboard_id = ?", (storyboard_id,))
+            for shot in shots:
+                connection.execute(
+                    """
+                    INSERT INTO storyboard_shots (
+                        shot_id, storyboard_id, generation_id, shot_index,
+                        narration, subtitle_text, shot_type, visual_goal,
+                        scene_id, scene_name, subject_ids_json, subject_names_json,
+                        visual_elements_json, reference_assets_json, camera_json,
+                        duration_sec, keyframe_prompt, video_prompt, negative_prompt,
+                        fact_safety_note, asset_status, keyframe_asset_id, video_asset_id,
+                        needs_manual_review, raw_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    storyboard_shot_values(shot),
+                )
+        saved = self.find_storyboard(storyboard_id)
+        if not saved:
+            raise KeyError(storyboard_id)
+        return saved
+
+    def list_storyboards(self, generation_id: str | None = None) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            if generation_id:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        storyboards.*,
+                        script_generations.topic,
+                        script_generations.script_json
+                    FROM storyboards
+                    LEFT JOIN script_generations
+                        ON script_generations.generation_id = storyboards.generation_id
+                    WHERE storyboards.generation_id = ?
+                    ORDER BY storyboards.created_at DESC, storyboards.updated_at DESC
+                    """,
+                    (generation_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT
+                        storyboards.*,
+                        script_generations.topic,
+                        script_generations.script_json
+                    FROM storyboards
+                    LEFT JOIN script_generations
+                        ON script_generations.generation_id = storyboards.generation_id
+                    ORDER BY storyboards.created_at DESC, storyboards.updated_at DESC
+                    """
+                ).fetchall()
+        return [storyboard_from_row(row) for row in rows]
+
+    def find_storyboard(self, storyboard_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    storyboards.*,
+                    script_generations.topic,
+                    script_generations.script_json
+                FROM storyboards
+                LEFT JOIN script_generations
+                    ON script_generations.generation_id = storyboards.generation_id
+                WHERE storyboards.storyboard_id = ?
+                """,
+                (storyboard_id,),
+            ).fetchone()
+        return storyboard_from_row(row) if row else None
+
+    def delete_storyboard(self, storyboard_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            connection.execute("DELETE FROM storyboards WHERE storyboard_id = ?", (storyboard_id,))
+        return self.list_storyboards()
+
+    def list_storyboard_shots(self, storyboard_id: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM storyboard_shots WHERE storyboard_id = ? ORDER BY shot_index",
+                (storyboard_id,),
+            ).fetchall()
+        return [storyboard_shot_from_row(row) for row in rows]
+
+    def update_storyboard_shot(self, storyboard_id: str, shot_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+        current = self.find_storyboard(storyboard_id)
+        if not current:
+            raise KeyError(storyboard_id)
+        shots = self.list_storyboard_shots(storyboard_id)
+        target = next((shot for shot in shots if shot["shot_id"] == shot_id), None)
+        if not target:
+            raise KeyError(shot_id)
+        merged = dict(target)
+        for key in (
+            "narration",
+            "subtitle_text",
+            "shot_type",
+            "visual_goal",
+            "scene_id",
+            "scene_name",
+            "subject_ids",
+            "subject_names",
+            "visual_elements",
+            "reference_assets",
+            "camera",
+            "duration_sec",
+            "keyframe_prompt",
+            "video_prompt",
+            "negative_prompt",
+            "fact_safety_note",
+            "asset_status",
+            "keyframe_asset_id",
+            "video_asset_id",
+            "needs_manual_review",
+        ):
+            if key in updates:
+                merged[key] = updates[key]
+        raw = dict(target.get("raw") or {})
+        raw.update({key: updates[key] for key in updates if key in merged})
+        merged["raw"] = raw
+        normalized = normalize_storyboard_shot_payload(
+            merged,
+            generation_id=current["generation_id"],
+            storyboard_id=storyboard_id,
+            index=int(target["shot_index"]),
+        )
+        normalized["shot_id"] = shot_id
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE storyboard_shots
+                SET narration = ?,
+                    subtitle_text = ?,
+                    shot_type = ?,
+                    visual_goal = ?,
+                    scene_id = ?,
+                    scene_name = ?,
+                    subject_ids_json = ?,
+                    subject_names_json = ?,
+                    visual_elements_json = ?,
+                    reference_assets_json = ?,
+                    camera_json = ?,
+                    duration_sec = ?,
+                    keyframe_prompt = ?,
+                    video_prompt = ?,
+                    negative_prompt = ?,
+                    fact_safety_note = ?,
+                    asset_status = ?,
+                    keyframe_asset_id = ?,
+                    video_asset_id = ?,
+                    needs_manual_review = ?,
+                    raw_json = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE storyboard_id = ? AND shot_id = ?
+                """,
+                (
+                    normalized["narration"],
+                    normalized["subtitle_text"],
+                    normalized["shot_type"],
+                    normalized["visual_goal"],
+                    normalized["scene_id"],
+                    normalized["scene_name"],
+                    json_dumps(normalized.get("subject_ids") or []),
+                    json_dumps(normalized.get("subject_names") or []),
+                    json_dumps(normalized.get("visual_elements") or []),
+                    json_dumps(normalized.get("reference_assets") or {}),
+                    json_dumps(normalized.get("camera") or {}),
+                    normalized["duration_sec"],
+                    normalized["keyframe_prompt"],
+                    normalized["video_prompt"],
+                    normalized["negative_prompt"],
+                    normalized["fact_safety_note"],
+                    normalized["asset_status"],
+                    normalized["keyframe_asset_id"],
+                    normalized["video_asset_id"],
+                    1 if normalized.get("needs_manual_review") else 0,
+                    json_dumps(normalized.get("raw") or {}),
+                    storyboard_id,
+                    shot_id,
+                ),
+            )
+            refresh_storyboard_totals(connection, storyboard_id)
+        updated = next((shot for shot in self.list_storyboard_shots(storyboard_id) if shot["shot_id"] == shot_id), None)
+        if not updated:
+            raise KeyError(shot_id)
         return updated
 
     def delete_script_generation(self, generation_id: str) -> list[dict[str, Any]]:
@@ -1837,6 +2135,223 @@ def script_generation_from_row(row: sqlite3.Row) -> dict[str, Any]:
         }
     )
     return result
+
+
+def storyboard_values(storyboard: dict[str, Any]) -> tuple[Any, ...]:
+    actual_duration = safe_float(storyboard.get("actual_duration_sec"), default=0.0)
+    target_duration = safe_int(storyboard.get("target_duration_sec"), default=0)
+    return (
+        storyboard["storyboard_id"],
+        storyboard["generation_id"],
+        storyboard.get("title", ""),
+        storyboard.get("source_type", "script_generation"),
+        storyboard.get("source_filename", ""),
+        storyboard.get("status", "draft"),
+        target_duration if target_duration > 0 else round(actual_duration),
+        actual_duration,
+        int(storyboard.get("shot_count") or 0),
+        json_dumps(storyboard.get("style_policy") or {}),
+        json_dumps(storyboard.get("missing_subject_candidates") or []),
+        json_dumps(storyboard.get("missing_scene_candidates") or []),
+        json_dumps(storyboard.get("review_notes") or []),
+        json_dumps(storyboard.get("raw") or storyboard),
+    )
+
+
+def storyboard_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    raw = json_loads(row["raw_json"], default={})
+    script = json_loads(row["script_json"], default={}) if "script_json" in row.keys() else {}
+    storyboard = dict(raw) if isinstance(raw, dict) else {}
+    storyboard.update(
+        {
+            "storyboard_id": row["storyboard_id"],
+            "generation_id": row["generation_id"],
+            "title": row["title"],
+            "source_type": row["source_type"],
+            "source_filename": row["source_filename"],
+            "status": row["status"],
+            "target_duration_sec": row["target_duration_sec"],
+            "actual_duration_sec": row["actual_duration_sec"] or 0,
+            "shot_count": row["shot_count"],
+            "style_policy": json_loads(row["style_policy_json"], default={}),
+            "missing_subject_candidates": json_loads(row["missing_subject_candidates_json"], default=[]),
+            "missing_scene_candidates": json_loads(row["missing_scene_candidates_json"], default=[]),
+            "review_notes": json_loads(row["review_notes_json"], default=[]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "topic": row["topic"] if "topic" in row.keys() else "",
+            "script_title": script.get("title") if isinstance(script, dict) else "",
+            "raw": raw,
+        }
+    )
+    if not storyboard["script_title"]:
+        storyboard["script_title"] = storyboard.get("topic") or storyboard.get("title") or ""
+    return storyboard
+
+
+def normalize_storyboard_shot_payload(
+    shot: dict[str, Any],
+    *,
+    generation_id: str,
+    storyboard_id: str,
+    index: int,
+) -> dict[str, Any]:
+    normalized = dict(shot)
+    normalized.update(
+        {
+            "shot_id": str(shot.get("shot_id") or f"shot-{uuid4().hex}"),
+            "storyboard_id": storyboard_id,
+            "generation_id": generation_id,
+            "shot_index": int(shot.get("shot_index") or index),
+            "narration": str(shot.get("narration") or ""),
+            "subtitle_text": str(shot.get("subtitle_text") or shot.get("narration") or ""),
+            "shot_type": str(shot.get("shot_type") or "narrative_shot"),
+            "visual_goal": str(shot.get("visual_goal") or ""),
+            "scene_id": str(shot.get("scene_id") or ""),
+            "scene_name": str(shot.get("scene_name") or ""),
+            "subject_ids": normalize_json_list(shot.get("subject_ids")),
+            "subject_names": normalize_json_list(shot.get("subject_names")),
+            "visual_elements": normalize_json_list(shot.get("visual_elements")),
+            "reference_assets": shot.get("reference_assets") if isinstance(shot.get("reference_assets"), dict) else {},
+            "camera": shot.get("camera") if isinstance(shot.get("camera"), dict) else {},
+            "duration_sec": safe_float(shot.get("duration_sec"), default=4.0),
+            "keyframe_prompt": str(shot.get("keyframe_prompt") or ""),
+            "video_prompt": str(shot.get("video_prompt") or ""),
+            "negative_prompt": str(shot.get("negative_prompt") or ""),
+            "fact_safety_note": str(shot.get("fact_safety_note") or ""),
+            "asset_status": str(shot.get("asset_status") or "missing_keyframe"),
+            "keyframe_asset_id": str(shot.get("keyframe_asset_id") or ""),
+            "video_asset_id": str(shot.get("video_asset_id") or ""),
+            "needs_manual_review": bool(shot.get("needs_manual_review")),
+            "raw": shot.get("raw") if isinstance(shot.get("raw"), dict) else shot,
+        }
+    )
+    return normalized
+
+
+def storyboard_shot_values(shot: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        shot["shot_id"],
+        shot["storyboard_id"],
+        shot["generation_id"],
+        int(shot["shot_index"]),
+        shot.get("narration", ""),
+        shot.get("subtitle_text", ""),
+        shot.get("shot_type", ""),
+        shot.get("visual_goal", ""),
+        shot.get("scene_id", ""),
+        shot.get("scene_name", ""),
+        json_dumps(shot.get("subject_ids") or []),
+        json_dumps(shot.get("subject_names") or []),
+        json_dumps(shot.get("visual_elements") or []),
+        json_dumps(shot.get("reference_assets") or {}),
+        json_dumps(shot.get("camera") or {}),
+        safe_float(shot.get("duration_sec"), default=4.0),
+        shot.get("keyframe_prompt", ""),
+        shot.get("video_prompt", ""),
+        shot.get("negative_prompt", ""),
+        shot.get("fact_safety_note", ""),
+        shot.get("asset_status", "missing_keyframe"),
+        shot.get("keyframe_asset_id", ""),
+        shot.get("video_asset_id", ""),
+        1 if shot.get("needs_manual_review") else 0,
+        json_dumps(shot.get("raw") or shot),
+    )
+
+
+def storyboard_shot_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    raw = json_loads(row["raw_json"], default={})
+    shot = dict(raw) if isinstance(raw, dict) else {}
+    shot.update(
+        {
+            "shot_id": row["shot_id"],
+            "storyboard_id": row["storyboard_id"],
+            "generation_id": row["generation_id"],
+            "shot_index": row["shot_index"],
+            "narration": row["narration"],
+            "subtitle_text": row["subtitle_text"],
+            "shot_type": row["shot_type"],
+            "visual_goal": row["visual_goal"],
+            "scene_id": row["scene_id"],
+            "scene_name": row["scene_name"],
+            "subject_ids": json_loads(row["subject_ids_json"], default=[]),
+            "subject_names": json_loads(row["subject_names_json"], default=[]),
+            "visual_elements": json_loads(row["visual_elements_json"], default=[]),
+            "reference_assets": json_loads(row["reference_assets_json"], default={}),
+            "camera": json_loads(row["camera_json"], default={}),
+            "duration_sec": row["duration_sec"],
+            "keyframe_prompt": row["keyframe_prompt"],
+            "video_prompt": row["video_prompt"],
+            "negative_prompt": row["negative_prompt"],
+            "fact_safety_note": row["fact_safety_note"],
+            "asset_status": row["asset_status"],
+            "keyframe_asset_id": row["keyframe_asset_id"],
+            "video_asset_id": row["video_asset_id"],
+            "needs_manual_review": bool(row["needs_manual_review"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "raw": raw,
+        }
+    )
+    return shot
+
+
+def refresh_storyboard_totals(connection: sqlite3.Connection, storyboard_id: str) -> None:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS shot_count,
+               COALESCE(SUM(duration_sec), 0) AS actual_duration_sec,
+               COALESCE(MAX(needs_manual_review), 0) AS needs_review
+        FROM storyboard_shots
+        WHERE storyboard_id = ?
+        """,
+        (storyboard_id,),
+    ).fetchone()
+    status = "needs_review" if row and int(row["needs_review"] or 0) else "completed"
+    connection.execute(
+        """
+        UPDATE storyboards
+        SET shot_count = ?,
+            actual_duration_sec = ?,
+            status = CASE WHEN status = 'failed' THEN status ELSE ? END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE storyboard_id = ?
+        """,
+        (
+            int(row["shot_count"] or 0) if row else 0,
+            float(row["actual_duration_sec"] or 0) if row else 0,
+            status,
+            storyboard_id,
+        ),
+    )
+
+
+def normalize_json_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        parsed = json_loads(value, default=None)
+        if isinstance(parsed, list):
+            value = parsed
+        elif value.strip():
+            value = [item.strip() for item in value.split(",")]
+        else:
+            value = []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def safe_float(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def safe_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def normalize_visual_subject_payload(subject: dict[str, Any]) -> dict[str, Any]:

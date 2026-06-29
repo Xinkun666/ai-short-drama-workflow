@@ -22,6 +22,10 @@ const state = {
   visualSceneScriptStage: "list",
   visualSceneStatuses: {},
   visualScriptSceneCounts: {},
+  storyboards: [],
+  selectedStoryboardScriptId: "",
+  storyboardUploadedFile: null,
+  storyboardTimers: [],
   timelineSources: [],
   selectedTimelineIds: new Set(),
   selected: null,
@@ -98,6 +102,16 @@ const elements = {
   scenePool: document.querySelector("#scenePool"),
   visualScriptScenes: document.querySelector("#visualScriptScenes"),
   visualSceneRejectedCandidates: document.querySelector("#visualSceneRejectedCandidates"),
+  storyboardUploadInput: document.querySelector("#storyboardUploadInput"),
+  storyboardScriptInput: document.querySelector("#storyboardScriptInput"),
+  storyboardUploadButton: document.querySelector("#storyboardUploadButton"),
+  storyboardSelectButton: document.querySelector("#storyboardSelectButton"),
+  storyboardGenerateButton: document.querySelector("#storyboardGenerateButton"),
+  storyboardStatus: document.querySelector("#storyboardStatus"),
+  storyboardAssetSummary: document.querySelector("#storyboardAssetSummary"),
+  storyboardScriptPicker: document.querySelector("#storyboardScriptPicker"),
+  storyboardRecordsList: document.querySelector("#storyboardRecordsList"),
+  refreshStoryboardsButton: document.querySelector("#refreshStoryboardsButton"),
 };
 
 async function readJsonResponse(response, fallbackMessage) {
@@ -131,9 +145,10 @@ function setActiveView(viewName) {
     });
   } else if (viewName === "scene") {
     closeTimelinePicker();
-    Promise.all([loadScriptGenerations(), loadVisualSubjects(), loadVisualScenes()]).catch((error) => {
+    Promise.all([loadScriptGenerations(), loadVisualSubjects(), loadVisualScenes(), loadStoryboards()]).catch((error) => {
       setVisualStatus(error.message, "error");
       setVisualSceneStatus(error.message, "error");
+      setStoryboardStatus(error.message, "error");
     });
   } else {
     closeTimelinePicker();
@@ -241,6 +256,7 @@ async function loadScriptGenerations() {
   renderScriptGenerations();
   renderVisualScriptSelect();
   renderSceneScriptSelect();
+  renderStoryboardScriptPicker();
 }
 
 function filteredRecords() {
@@ -1223,6 +1239,225 @@ function renderVisualSceneRejectedCandidates() {
     .join("");
 }
 
+function setStoryboardStatus(message, kind = "") {
+  if (!elements.storyboardStatus) return;
+  elements.storyboardStatus.textContent = message;
+  elements.storyboardStatus.dataset.status = kind;
+}
+
+function currentStoryboardScript() {
+  return state.scriptGenerations.find((script) => script.generation_id === state.selectedStoryboardScriptId) || null;
+}
+
+function updateStoryboardScriptInput() {
+  if (!elements.storyboardScriptInput) return;
+  if (state.storyboardUploadedFile) {
+    elements.storyboardScriptInput.value = state.storyboardUploadedFile.name;
+    return;
+  }
+  const script = currentStoryboardScript();
+  elements.storyboardScriptInput.value = script ? script.script_title || script.topic || script.generation_id : "";
+}
+
+function renderStoryboardScriptPicker() {
+  if (!elements.storyboardScriptPicker) return;
+  if (!state.scriptGenerations.length) {
+    state.selectedStoryboardScriptId = "";
+    elements.storyboardScriptPicker.innerHTML = '<div class="visual-empty-state compact"><strong>暂无剧本</strong><span>先在“剧本生成”里生成剧本。</span></div>';
+    updateStoryboardScriptInput();
+    return;
+  }
+  if (!state.selectedStoryboardScriptId) {
+    state.selectedStoryboardScriptId = state.scriptGenerations[0].generation_id;
+  }
+  const existing = state.scriptGenerations.some((script) => script.generation_id === state.selectedStoryboardScriptId);
+  if (!existing) {
+    state.selectedStoryboardScriptId = state.scriptGenerations[0].generation_id;
+  }
+  elements.storyboardScriptPicker.innerHTML = state.scriptGenerations
+    .map((script) => {
+      const active = script.generation_id === state.selectedStoryboardScriptId;
+      return `
+        <button class="storyboard-script-option ${active ? "active" : ""}" type="button" data-storyboard-script="${escapeHtml(script.generation_id)}">
+          <strong>${escapeHtml(script.script_title || script.topic || script.generation_id)}</strong>
+          <span>${escapeHtml(script.created_at || "")}</span>
+        </button>
+      `;
+    })
+    .join("");
+  elements.storyboardScriptPicker.querySelectorAll("[data-storyboard-script]").forEach((button) => {
+    button.addEventListener("click", () => selectStoryboardScript(button.dataset.storyboardScript));
+  });
+  updateStoryboardScriptInput();
+}
+
+function toggleStoryboardScriptPicker() {
+  if (!elements.storyboardScriptPicker) return;
+  elements.storyboardScriptPicker.hidden = !elements.storyboardScriptPicker.hidden;
+}
+
+function selectStoryboardScript(generationId) {
+  if (!generationId) return;
+  state.storyboardUploadedFile = null;
+  if (elements.storyboardUploadInput) {
+    elements.storyboardUploadInput.value = "";
+  }
+  state.selectedStoryboardScriptId = generationId;
+  elements.storyboardScriptPicker.hidden = true;
+  renderStoryboardScriptPicker();
+  updateStoryboardScriptInput();
+  loadStoryboardAssetSummary(generationId).catch((error) => setStoryboardStatus(error.message, "error"));
+}
+
+async function loadStoryboardAssetSummary(generationId) {
+  if (!generationId || !elements.storyboardAssetSummary) return;
+  const [subjectResponse, sceneResponse] = await Promise.all([
+    fetch(`/api/script/generations/${encodeURIComponent(generationId)}/visual-subjects`),
+    fetch(`/api/script/generations/${encodeURIComponent(generationId)}/visual-scenes`),
+  ]);
+  const subjectPayload = await readJsonResponse(subjectResponse, "主体池读取失败");
+  const scenePayload = await readJsonResponse(sceneResponse, "场景池读取失败");
+  const subjects = subjectPayload.subjects || [];
+  const scenes = scenePayload.scenes || [];
+  const missingSubjectAnchors = subjects.filter((subject) => !subject.has_anchor_asset).length;
+  const missingSceneAnchors = scenes.filter((scene) => !scene.has_anchor_asset).length;
+  elements.storyboardAssetSummary.textContent =
+    `主体 ${subjects.length} 个，缺锚点 ${missingSubjectAnchors} 个 · 场景 ${scenes.length} 个，缺锚点 ${missingSceneAnchors} 个`;
+}
+
+function clearStoryboardTimers() {
+  state.storyboardTimers.forEach((timer) => window.clearTimeout(timer));
+  state.storyboardTimers = [];
+}
+
+function scheduleStoryboardSteps() {
+  clearStoryboardTimers();
+  const steps = [
+    "正在读取剧本",
+    "正在读取主体池",
+    "正在读取场景池",
+    "正在拆分旁白",
+    "正在绑定主体与场景",
+    "正在生成 Seedream 关键帧提示词",
+    "正在保存分镜",
+  ];
+  steps.forEach((step, index) => {
+    state.storyboardTimers.push(
+      window.setTimeout(() => {
+        if (elements.storyboardGenerateButton && elements.storyboardGenerateButton.disabled) {
+          setStoryboardStatus(step, "loading");
+        }
+      }, index * 850)
+    );
+  });
+}
+
+async function generateStoryboard() {
+  elements.storyboardGenerateButton.disabled = true;
+  scheduleStoryboardSteps();
+  try {
+    let response;
+    if (state.storyboardUploadedFile) {
+      const formData = new FormData();
+      formData.append("file", state.storyboardUploadedFile);
+      response = await fetch("/api/storyboards/extract-from-upload", { method: "POST", body: formData });
+    } else {
+      if (!state.selectedStoryboardScriptId) {
+        clearStoryboardTimers();
+        setStoryboardStatus("请先选择剧本。", "error");
+        return;
+      }
+      response = await fetch(`/api/script/generations/${encodeURIComponent(state.selectedStoryboardScriptId)}/storyboard/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+    }
+    const payload = await readJsonResponse(response, "分镜解析失败");
+    clearStoryboardTimers();
+    state.storyboardUploadedFile = null;
+    if (elements.storyboardUploadInput) {
+      elements.storyboardUploadInput.value = "";
+    }
+    state.selectedStoryboardScriptId = payload.generation.generation_id;
+    updateStoryboardScriptInput();
+    await Promise.all([loadScriptGenerations(), loadStoryboards()]);
+    setStoryboardStatus(`解析完成：生成 ${payload.storyboard.shot_count || 0} 个镜头。`, "success");
+  } catch (error) {
+    clearStoryboardTimers();
+    setStoryboardStatus(error.message, "error");
+  } finally {
+    elements.storyboardGenerateButton.disabled = false;
+  }
+}
+
+async function loadStoryboards() {
+  if (!elements.storyboardRecordsList) return;
+  const response = await fetch("/api/storyboards");
+  const payload = await readJsonResponse(response, "分镜记录读取失败");
+  state.storyboards = payload.storyboards || [];
+  renderStoryboardRecords();
+}
+
+function renderStoryboardRecords() {
+  if (!elements.storyboardRecordsList) return;
+  if (!state.storyboards.length) {
+    elements.storyboardRecordsList.innerHTML = '<div class="visual-empty-state compact"><strong>暂无分镜记录</strong><span>选择剧本并点击“解析”。</span></div>';
+    return;
+  }
+  elements.storyboardRecordsList.innerHTML = state.storyboards
+    .map((record) => {
+      return `
+        <article class="storyboard-record-card">
+          <div>
+            <span class="record-label">剧本标题</span>
+            <strong>${escapeHtml(record.script_title || record.title || "")}</strong>
+          </div>
+          <div>
+            <span class="record-label">生成时间</span>
+            <span>${escapeHtml(record.created_at || "")}</span>
+          </div>
+          <div>
+            <span class="record-label">镜头数量</span>
+            <span>${escapeHtml(String(record.shot_count || 0))} 个镜头</span>
+          </div>
+          <div>
+            <span class="record-label">预计时长</span>
+            <span>${escapeHtml(String(Math.round(Number(record.actual_duration_sec || 0))))} 秒</span>
+          </div>
+          <div>
+            <span class="record-label">状态</span>
+            <em data-status="${escapeHtml(record.status || "")}">${escapeHtml(storyboardStatusLabel(record.status))}</em>
+          </div>
+          <a class="record-action" href="/storyboards/${encodeURIComponent(record.storyboard_id)}">详情</a>
+          <button class="record-action delete" type="button" data-storyboard-delete="${escapeHtml(record.storyboard_id)}">删除</button>
+        </article>
+      `;
+    })
+    .join("");
+  elements.storyboardRecordsList.querySelectorAll("[data-storyboard-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteStoryboardRecord(button.dataset.storyboardDelete));
+  });
+}
+
+function storyboardStatusLabel(status) {
+  const labels = {
+    completed: "已完成",
+    draft: "生成中",
+    failed: "生成失败",
+    needs_review: "需要人工检查",
+  };
+  return labels[status] || status || "已完成";
+}
+
+async function deleteStoryboardRecord(storyboardId) {
+  const response = await fetch(`/api/storyboards/${encodeURIComponent(storyboardId)}`, { method: "DELETE" });
+  const payload = await readJsonResponse(response, "删除分镜失败");
+  state.storyboards = payload.storyboards || [];
+  renderStoryboardRecords();
+  setStoryboardStatus("分镜记录已删除。", "success");
+}
+
 function setSceneBuilderTab(tabName) {
   const nextTab = ["subjects", "scenes", "storyboard"].includes(tabName) ? tabName : "subjects";
   elements.sceneModuleTabs.forEach((tab) => {
@@ -1238,6 +1473,15 @@ function setSceneBuilderTab(tabName) {
   if (nextTab === "scenes") {
     Promise.all([loadScriptGenerations(), loadVisualScenes()]).catch((error) => {
       setVisualSceneStatus(error.message, "error");
+    });
+  } else if (nextTab === "storyboard") {
+    Promise.all([loadScriptGenerations(), loadStoryboards()]).then(() => {
+      updateStoryboardScriptInput();
+      if (state.selectedStoryboardScriptId) {
+        loadStoryboardAssetSummary(state.selectedStoryboardScriptId).catch((error) => setStoryboardStatus(error.message, "error"));
+      }
+    }).catch((error) => {
+      setStoryboardStatus(error.message, "error");
     });
   }
 }
@@ -1905,9 +2149,34 @@ elements.refreshVisualScenesButton.addEventListener("click", () => {
 elements.refreshVisualScriptScenesButton.addEventListener("click", () => {
   loadScriptVisualScenes(state.selectedVisualSceneScriptId).catch((error) => setVisualSceneStatus(error.message, "error"));
 });
+elements.storyboardUploadButton.addEventListener("click", () => elements.storyboardUploadInput.click());
+elements.storyboardUploadInput.addEventListener("change", () => {
+  const file = elements.storyboardUploadInput.files[0];
+  if (!file) return;
+  state.storyboardUploadedFile = file;
+  updateStoryboardScriptInput();
+  elements.storyboardAssetSummary.textContent = "上传剧本 · 主体 0 个 · 场景 0 个";
+  setStoryboardStatus("已选择上传剧本，点击“解析”生成分镜。", "success");
+});
+elements.storyboardSelectButton.addEventListener("click", () => {
+  renderStoryboardScriptPicker();
+  toggleStoryboardScriptPicker();
+});
+elements.storyboardGenerateButton.addEventListener("click", generateStoryboard);
+elements.refreshStoryboardsButton.addEventListener("click", () => {
+  loadStoryboards().catch((error) => setStoryboardStatus(error.message, "error"));
+});
 document.addEventListener("click", (event) => {
   if (!elements.timelinePicker.contains(event.target) && !elements.timelinePopover.hidden) {
     closeTimelinePicker();
+  }
+  if (
+    elements.storyboardScriptPicker &&
+    !elements.storyboardScriptPicker.hidden &&
+    !elements.storyboardScriptPicker.contains(event.target) &&
+    event.target !== elements.storyboardSelectButton
+  ) {
+    elements.storyboardScriptPicker.hidden = true;
   }
 });
 window.addEventListener("hashchange", applyHashView);

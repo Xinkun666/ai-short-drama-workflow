@@ -285,7 +285,11 @@ def test_homepage_renders_scene_builder_workspace(tmp_path):
     assert "解析主体" in html
     assert "管理短剧中需要保持视觉一致的环境空间" in html
     assert "解析场景" in html
-    assert "用于把剧本拆成镜头卡" in html
+    assert "storyboardScriptInput" in html
+    assert "storyboardUploadButton" in html
+    assert "storyboardSelectButton" in html
+    assert "storyboardGenerateButton" in html
+    assert "分镜记录" in html
 
 
 def test_subject_pool_renders_asset_workbench_layout(tmp_path):

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>AI短剧工作站</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260628a">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260628b">
   </head>
   <body>
     <main class="prepare-shell">
@@ -299,14 +299,34 @@
           </section>
 
           <section class="scene-module-panel" data-scene-panel="storyboard" hidden>
-            <div class="scene-placeholder">
-              用于把剧本拆成镜头卡，后续每个镜头会绑定主体、场景、旁白、画面提示词和视频生成任务。
+            <div class="storyboard-toolbar">
+              <input id="storyboardUploadInput" type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" hidden>
+              <label class="storyboard-script-field" for="storyboardScriptInput">
+                <span>剧本</span>
+                <input id="storyboardScriptInput" type="text" value="" placeholder="未选择剧本" readonly>
+              </label>
+              <button class="visual-button secondary" id="storyboardUploadButton" type="button">上传剧本</button>
+              <button class="visual-button secondary" id="storyboardSelectButton" type="button">选择剧本</button>
+              <button class="visual-button primary" id="storyboardGenerateButton" type="button">解析</button>
+              <div class="storyboard-toolbar-footer">
+                <div class="visual-status" id="storyboardStatus">请选择已有剧本或上传剧本文本。</div>
+                <div class="visual-current-script" id="storyboardAssetSummary">主体 0 个 · 场景 0 个</div>
+              </div>
+              <div class="storyboard-script-picker" id="storyboardScriptPicker" hidden></div>
             </div>
+
+            <section class="storyboard-record-panel" aria-label="分镜记录">
+              <div class="records-header">
+                <span>分镜记录</span>
+                <button class="text-button" id="refreshStoryboardsButton" type="button">刷新</button>
+              </div>
+              <div class="storyboard-record-list" id="storyboardRecordsList"></div>
+            </section>
           </section>
         </section>
       </section>
     </main>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=20260628a"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=20260628b"></script>
   </body>
 </html>

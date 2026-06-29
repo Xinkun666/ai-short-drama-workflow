@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from dataclasses import asdict
@@ -17,6 +18,7 @@ from drama_agents.material_splitter import MaterialSplitter, SUPPORTED_MATERIAL_
 from drama_agents.script_agent import ScriptAgent, render_script_markdown
 from drama_agents.script_assistant import ScriptAssistantController
 from drama_agents.storage import MaterialDatabase, group_visual_scenes
+from drama_agents.storyboard_agent import StoryboardAgent
 from drama_agents.timeline_builder import TimelineBuilder, result_to_payload as timeline_result_to_payload
 from drama_agents.vector_store import LocalVectorStore, build_material_chunks
 from drama_agents.visual_anchor_agent import VisualAnchorAgent
@@ -39,6 +41,7 @@ def create_app(
     subject_provider=ENV_PROVIDER,
     scene_provider=ENV_PROVIDER,
     anchor_provider=ENV_PROVIDER,
+    storyboard_provider=ENV_PROVIDER,
 ) -> Flask:
     package_dir = Path(__file__).parent
     app = Flask(
@@ -78,6 +81,11 @@ def create_app(
         VisualAnchorAgent.from_environment()
         if anchor_provider is ENV_PROVIDER
         else VisualAnchorAgent(anchor_provider)
+    )
+    storyboard_agent = (
+        StoryboardAgent.from_environment()
+        if storyboard_provider is ENV_PROVIDER
+        else StoryboardAgent(storyboard_provider)
     )
     upload_path.mkdir(parents=True, exist_ok=True)
     output_splits_path.mkdir(parents=True, exist_ok=True)
@@ -570,6 +578,98 @@ def create_app(
             }
         )
 
+    @app.route("/api/script/generations/<generation_id>/storyboard/generate", methods=["POST"])
+    def generate_storyboard_from_script(generation_id: str):
+        payload = request.get_json(silent=True) or {}
+        target_duration_sec = parse_optional_int(payload.get("target_duration_sec"))
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        subjects = database.list_script_visual_subjects(generation_id)
+        scenes = database.list_script_visual_scenes(generation_id)
+        try:
+            storyboard_payload = storyboard_agent.generate(
+                generation=generation,
+                subjects=subjects,
+                scenes=scenes,
+                target_duration_sec=target_duration_sec,
+                source_type="script_generation",
+            )
+            storyboard = database.save_storyboard(generation_id, storyboard_payload)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        shots = database.list_storyboard_shots(storyboard["storyboard_id"])
+        return jsonify({"generation": generation, "storyboard": storyboard, "shots": shots})
+
+    @app.route("/api/storyboards/extract-from-upload", methods=["POST"])
+    def extract_storyboard_from_upload():
+        file = request.files.get("file")
+        if not file or not file.filename:
+            return jsonify({"error": "没有收到上传剧本"}), 400
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown", ".json"}:
+            return jsonify({"error": "暂只支持 TXT / MD / JSON 剧本文件"}), 400
+        filename = secure_filename(file.filename) or f"script{suffix}"
+        destination = unique_path(upload_path / filename)
+        file.save(destination)
+        try:
+            text = destination.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return jsonify({"error": "剧本文件需要是 UTF-8 文本"}), 400
+        target_duration_sec = parse_optional_int(request.form.get("target_duration_sec"))
+        generation = script_generation_from_uploaded_text(destination, text)
+        database = MaterialDatabase(database_path)
+        database.save_script_generation(generation)
+        try:
+            storyboard_payload = storyboard_agent.generate(
+                generation=generation,
+                subjects=[],
+                scenes=[],
+                target_duration_sec=target_duration_sec,
+                source_type="upload",
+                source_filename=filename,
+            )
+            storyboard = database.save_storyboard(generation["generation_id"], storyboard_payload)
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        shots = database.list_storyboard_shots(storyboard["storyboard_id"])
+        return jsonify({"generation": database.find_script_generation(generation["generation_id"]) or generation, "storyboard": storyboard, "shots": shots})
+
+    @app.route("/api/script/generations/<generation_id>/storyboards", methods=["GET"])
+    def list_generation_storyboards(generation_id: str):
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        return jsonify({"generation": generation, "storyboards": database.list_storyboards(generation_id)})
+
+    @app.route("/api/storyboards", methods=["GET"])
+    def list_storyboards():
+        return jsonify({"storyboards": MaterialDatabase(database_path).list_storyboards()})
+
+    @app.route("/api/storyboards/<storyboard_id>", methods=["GET"])
+    def get_storyboard(storyboard_id: str):
+        database = MaterialDatabase(database_path)
+        storyboard = database.find_storyboard(storyboard_id)
+        if not storyboard:
+            abort(404)
+        return jsonify({"storyboard": storyboard, "shots": database.list_storyboard_shots(storyboard_id)})
+
+    @app.route("/api/storyboards/<storyboard_id>/shots/<shot_id>", methods=["PATCH"])
+    def update_storyboard_shot(storyboard_id: str, shot_id: str):
+        payload = request.get_json(silent=True) or {}
+        try:
+            shot = MaterialDatabase(database_path).update_storyboard_shot(storyboard_id, shot_id, payload)
+        except KeyError:
+            abort(404)
+        return jsonify({"shot": shot})
+
+    @app.route("/api/storyboards/<storyboard_id>", methods=["DELETE"])
+    def delete_storyboard(storyboard_id: str):
+        storyboards = MaterialDatabase(database_path).delete_storyboard(storyboard_id)
+        return jsonify({"deleted": storyboard_id, "storyboards": storyboards})
+
     @app.route("/api/script/generations/<generation_id>/article", methods=["PATCH"])
     def update_script_article(generation_id: str):
         payload = request.get_json(silent=True) or {}
@@ -735,6 +835,23 @@ def create_app(
             generation=generation,
             section=section,
             section_title=section_titles[section],
+        )
+
+    @app.route("/storyboards/<storyboard_id>", methods=["GET"])
+    def storyboard_detail_page(storyboard_id: str):
+        database = MaterialDatabase(database_path)
+        storyboard = database.find_storyboard(storyboard_id)
+        if not storyboard:
+            abort(404)
+        generation = database.find_script_generation(storyboard["generation_id"]) or {}
+        return render_template(
+            "storyboard_detail.html",
+            storyboard=storyboard,
+            generation=generation,
+            shots=database.list_storyboard_shots(storyboard_id),
+            subjects=database.list_script_visual_subjects(storyboard["generation_id"]),
+            scenes=database.list_script_visual_scenes(storyboard["generation_id"]),
+            ark_ready=bool(os.environ.get("ARK_API_KEY")),
         )
 
     @app.route("/api/script/generations/<generation_id>", methods=["DELETE"])
@@ -1010,6 +1127,14 @@ def rebuild_rag_for_records(database_path: Path, outputs_path: Path, rag_databas
     database = MaterialDatabase(database_path)
     chunks = build_material_chunks(database, outputs_path, record_ids)
     return LocalVectorStore(rag_database_path).replace_record_chunks(record_ids, chunks)
+
+
+def parse_optional_int(value) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def parse_pdf_source(source: Path, output_splits_path: Path):

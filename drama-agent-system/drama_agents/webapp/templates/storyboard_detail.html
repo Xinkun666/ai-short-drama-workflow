@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ storyboard.title }} · 分镜详情</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260628b">
+  </head>
+  <body>
+    <main class="storyboard-detail-shell">
+      <header class="storyboard-detail-hero">
+        <div>
+          <div class="eyebrow">分镜详情</div>
+          <h1>{{ storyboard.script_title or storyboard.title }}</h1>
+          <div class="storyboard-detail-meta">
+            <span>{{ storyboard.created_at }}</span>
+            <span>{{ storyboard.shot_count }} 个镜头</span>
+            <span>{{ "%.0f"|format(storyboard.actual_duration_sec or 0) }} 秒</span>
+            <span>{{ storyboard.status }}</span>
+          </div>
+        </div>
+        <div class="storyboard-detail-actions">
+          <a class="record-action" href="/#scene">返回</a>
+          <button class="record-action delete" id="deleteStoryboardButton" type="button">删除</button>
+          <button class="record-action" id="regenerateStoryboardButton" type="button">重新生成</button>
+        </div>
+      </header>
+
+      <section class="storyboard-detail-grid">
+        <aside class="storyboard-shot-sidebar">
+          <div class="visual-panel-head">
+            <div>
+              <span>镜头卡</span>
+              <small>{{ storyboard.title }}</small>
+            </div>
+          </div>
+          <div id="storyboardShotList" class="storyboard-shot-list"></div>
+        </aside>
+
+        <section id="storyboardShotEditor" class="storyboard-shot-editor">
+          <div class="visual-panel-head">
+            <div>
+              <span>镜头详情</span>
+              <small id="storyboardShotEditorStatus">选择镜头后编辑</small>
+            </div>
+          </div>
+          <form id="storyboardShotForm" class="storyboard-shot-form">
+            <label>
+              <span>旁白 narration</span>
+              <textarea name="narration" rows="5"></textarea>
+            </label>
+            <label>
+              <span>字幕 subtitle_text</span>
+              <textarea name="subtitle_text" rows="3"></textarea>
+            </label>
+            <div class="storyboard-form-row">
+              <label>
+                <span>shot_type</span>
+                <select name="shot_type">
+                  <option value="hook_shot">hook_shot</option>
+                  <option value="narrative_shot">narrative_shot</option>
+                  <option value="explainer_shot">explainer_shot</option>
+                  <option value="comparison_shot">comparison_shot</option>
+                  <option value="map_shot">map_shot</option>
+                  <option value="concept_shot">concept_shot</option>
+                  <option value="transition_shot">transition_shot</option>
+                  <option value="montage_shot">montage_shot</option>
+                  <option value="key_comic_shot">key_comic_shot</option>
+                  <option value="asset_shot">asset_shot</option>
+                </select>
+              </label>
+              <label>
+                <span>duration_sec</span>
+                <input name="duration_sec" type="number" min="1" max="12" step="0.5">
+              </label>
+            </div>
+            <label>
+              <span>视觉目标 visual_goal</span>
+              <textarea name="visual_goal" rows="3"></textarea>
+            </label>
+            <div class="storyboard-form-row">
+              <label>
+                <span>绑定场景 scene_id</span>
+                <select name="scene_id">
+                  <option value="">不绑定场景</option>
+                  {% for scene in scenes %}
+                    <option value="{{ scene.scene_id }}">{{ scene.canonical_name }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <label>
+                <span>绑定主体 subject_ids</span>
+                <input name="subject_ids" type="text" placeholder="subject_id 用逗号分隔">
+              </label>
+            </div>
+            <section class="storyboard-reference-box">
+              <strong>参考资产</strong>
+              <div id="storyboardReferenceAssets"></div>
+            </section>
+            <label>
+              <span>visual_elements</span>
+              <input name="visual_elements" type="text" placeholder="画面元素，用逗号分隔">
+            </label>
+            <label>
+              <span>camera</span>
+              <textarea name="camera" rows="3"></textarea>
+            </label>
+            <label>
+              <span>keyframe_prompt</span>
+              <textarea name="keyframe_prompt" rows="7"></textarea>
+            </label>
+            <label>
+              <span>video_prompt</span>
+              <textarea name="video_prompt" rows="4"></textarea>
+            </label>
+            <label>
+              <span>negative_prompt</span>
+              <textarea name="negative_prompt" rows="3"></textarea>
+            </label>
+            <label>
+              <span>事实边界 fact_safety_note</span>
+              <textarea name="fact_safety_note" rows="3"></textarea>
+            </label>
+            <label class="storyboard-check-row">
+              <input name="needs_manual_review" type="checkbox">
+              <span>需要人工检查</span>
+            </label>
+            <div class="storyboard-editor-actions">
+              <button class="visual-button primary" type="submit">保存修改</button>
+              <button class="visual-button secondary" id="singleKeyframeButton" type="button">生成本镜头关键帧</button>
+              <button class="visual-button secondary" id="batchKeyframeButton" type="button">批量生成关键帧</button>
+            </div>
+          </form>
+        </section>
+      </section>
+    </main>
+
+    <script>
+      const storyboard = {{ storyboard|tojson }};
+      let shots = {{ shots|tojson }};
+      const subjects = {{ subjects|tojson }};
+      const scenes = {{ scenes|tojson }};
+      const arkReady = {{ "true" if ark_ready else "false" }};
+      const shotApiBase = `/api/storyboards/{{ storyboard.storyboard_id }}/shots/`;
+      const shotList = document.querySelector("#storyboardShotList");
+      const form = document.querySelector("#storyboardShotForm");
+      const editorStatus = document.querySelector("#storyboardShotEditorStatus");
+      const referenceAssets = document.querySelector("#storyboardReferenceAssets");
+      let activeShotId = shots[0] ? shots[0].shot_id : "";
+
+      function escapeHtml(value) {
+        return String(value || "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function shotTypeLabel(type) {
+        const labels = {
+          hook_shot: "开头钩子",
+          narrative_shot: "叙事推进",
+          explainer_shot: "知识图解",
+          comparison_shot: "对比镜头",
+          map_shot: "地图迁徙",
+          concept_shot: "概念图解",
+          transition_shot: "转场",
+          montage_shot: "蒙太奇",
+          key_comic_shot: "重点漫画",
+          asset_shot: "道具特写",
+        };
+        return labels[type] || type || "镜头";
+      }
+
+      function renderShotList() {
+        shotList.innerHTML = shots.map((shot) => `
+          <button class="storyboard-shot-card ${shot.shot_id === activeShotId ? "active" : ""}" type="button" data-shot-id="${escapeHtml(shot.shot_id)}">
+            <strong>#${String(shot.shot_index).padStart(2, "0")} · ${escapeHtml(shotTypeLabel(shot.shot_type))}</strong>
+            <span>${escapeHtml((shot.narration || "").slice(0, 58))}</span>
+            <em>${escapeHtml(shot.scene_name || "未绑定场景")} · ${escapeHtml((shot.subject_names || []).join("、") || "未绑定主体")}</em>
+            <small>${escapeHtml(String(shot.duration_sec || 0))} 秒 · ${escapeHtml(shot.asset_status || "")}</small>
+          </button>
+        `).join("") || '<div class="visual-empty-state compact"><strong>暂无镜头</strong></div>';
+        shotList.querySelectorAll("[data-shot-id]").forEach((button) => {
+          button.addEventListener("click", () => {
+            activeShotId = button.dataset.shotId;
+            renderShotList();
+            renderActiveShot();
+          });
+        });
+      }
+
+      function renderActiveShot() {
+        const shot = shots.find((item) => item.shot_id === activeShotId);
+        if (!shot) return;
+        editorStatus.textContent = `#${String(shot.shot_index).padStart(2, "0")} · ${shotTypeLabel(shot.shot_type)}`;
+        form.narration.value = shot.narration || "";
+        form.subtitle_text.value = shot.subtitle_text || "";
+        form.shot_type.value = shot.shot_type || "narrative_shot";
+        form.duration_sec.value = shot.duration_sec || 4;
+        form.visual_goal.value = shot.visual_goal || "";
+        form.scene_id.value = shot.scene_id || "";
+        form.subject_ids.value = (shot.subject_ids || []).join(", ");
+        form.visual_elements.value = (shot.visual_elements || []).join(", ");
+        form.camera.value = JSON.stringify(shot.camera || {}, null, 2);
+        form.keyframe_prompt.value = shot.keyframe_prompt || "";
+        form.video_prompt.value = shot.video_prompt || "";
+        form.negative_prompt.value = shot.negative_prompt || "";
+        form.fact_safety_note.value = shot.fact_safety_note || "";
+        form.needs_manual_review.checked = Boolean(shot.needs_manual_review);
+        referenceAssets.innerHTML = renderReferenceAssets(shot.reference_assets || {});
+      }
+
+      function renderReferenceAssets(assets) {
+        const subjectAssets = (assets.subject_anchors || []).map((asset) => renderAsset("主体", asset)).join("");
+        const sceneAssets = (assets.scene_anchors || []).map((asset) => renderAsset("场景", asset)).join("");
+        return subjectAssets + sceneAssets || '<span class="visual-empty-inline">暂无参考资产。</span>';
+      }
+
+      function renderAsset(kind, asset) {
+        const image = asset.asset_url ? `<img src="${escapeHtml(asset.asset_url)}" alt="${escapeHtml(asset.name || kind)}" loading="lazy">` : "";
+        return `
+          <article>
+            ${image}
+            <div><strong>${escapeHtml(kind)} · ${escapeHtml(asset.name || "")}</strong><span>${asset.asset_url ? "已有锚点图" : "缺少锚点图"}</span></div>
+            <p>${escapeHtml(asset.visual_prompt || "")}</p>
+          </article>
+        `;
+      }
+
+      function parseCommaList(value) {
+        return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const shot = shots.find((item) => item.shot_id === activeShotId);
+        if (!shot) return;
+        let camera = {};
+        try {
+          camera = JSON.parse(form.camera.value || "{}");
+        } catch (error) {
+          editorStatus.textContent = "camera 需要是合法 JSON";
+          return;
+        }
+        const scene = scenes.find((item) => item.scene_id === form.scene_id.value);
+        const subjectIds = parseCommaList(form.subject_ids.value);
+        const subjectNames = subjectIds.map((subjectId) => {
+          const subject = subjects.find((item) => item.subject_id === subjectId);
+          return subject ? subject.canonical_name : "";
+        }).filter(Boolean);
+        const response = await fetch(`${shotApiBase}${encodeURIComponent(activeShotId)}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            narration: form.narration.value,
+            subtitle_text: form.subtitle_text.value,
+            shot_type: form.shot_type.value,
+            duration_sec: Number(form.duration_sec.value || 4),
+            visual_goal: form.visual_goal.value,
+            scene_id: form.scene_id.value,
+            scene_name: scene ? scene.canonical_name : "",
+            subject_ids: subjectIds,
+            subject_names: subjectNames,
+            visual_elements: parseCommaList(form.visual_elements.value),
+            camera,
+            keyframe_prompt: form.keyframe_prompt.value,
+            video_prompt: form.video_prompt.value,
+            negative_prompt: form.negative_prompt.value,
+            fact_safety_note: form.fact_safety_note.value,
+            needs_manual_review: form.needs_manual_review.checked,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          editorStatus.textContent = payload.error || "保存失败";
+          return;
+        }
+        shots = shots.map((item) => (item.shot_id === payload.shot.shot_id ? payload.shot : item));
+        renderShotList();
+        renderActiveShot();
+        editorStatus.textContent = "已保存";
+      });
+
+      document.querySelector("#singleKeyframeButton").addEventListener("click", () => {
+        editorStatus.textContent = arkReady ? "关键帧生成接口将在下一阶段接入。" : "未配置 ARK_API_KEY，无法调用 Seedream 生成关键帧。";
+      });
+      document.querySelector("#batchKeyframeButton").addEventListener("click", () => {
+        editorStatus.textContent = arkReady ? "批量关键帧生成将在下一阶段接入。" : "未配置 ARK_API_KEY，无法调用 Seedream 生成关键帧。";
+      });
+      document.querySelector("#deleteStoryboardButton").addEventListener("click", async () => {
+        if (!window.confirm("删除这条分镜记录？")) return;
+        const response = await fetch(`/api/storyboards/${encodeURIComponent(storyboard.storyboard_id)}`, { method: "DELETE" });
+        if (response.ok) {
+          window.location.href = "/#scene";
+        }
+      });
+      document.querySelector("#regenerateStoryboardButton").addEventListener("click", async () => {
+        editorStatus.textContent = "正在重新生成分镜...";
+        const response = await fetch(`/api/script/generations/${encodeURIComponent(storyboard.generation_id)}/storyboard/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force: true }),
+        });
+        const payload = await response.json();
+        if (response.ok) {
+          window.location.href = `/storyboards/${encodeURIComponent(payload.storyboard.storyboard_id)}`;
+        } else {
+          editorStatus.textContent = payload.error || "重新生成失败";
+        }
+      });
+
+      renderShotList();
+      renderActiveShot();
+    </script>
+  </body>
+</html>
