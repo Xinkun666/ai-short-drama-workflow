@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ generation.topic }} - {{ section_title }}</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260627c">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260630a">
   </head>
   <body>
     <main class="script-page-shell">
@@ -21,10 +21,12 @@
         </div>
       </header>
 
+      {% set storyboard_script = generation.script.storyboard_script or {} %}
+      {% set has_storyboard_script = storyboard_script.adapted_article %}
       <nav class="script-page-tabs" aria-label="剧本生成查看器">
         <a class="{% if section == 'script' %}active{% endif %}" href="/script-generations/{{ generation.generation_id }}/script">剧本</a>
-        <a class="{% if section == 'subjects' %}active{% endif %}" href="/script-generations/{{ generation.generation_id }}/subjects">主体</a>
-        <a class="{% if section == 'maps' %}active{% endif %}" href="/script-generations/{{ generation.generation_id }}/maps">地点</a>
+        <a class="{% if not has_storyboard_script %}disabled{% endif %}" data-storyboard-script-link aria-disabled="{% if has_storyboard_script %}false{% else %}true{% endif %}" {% if has_storyboard_script %}href="/#storyboard"{% endif %}>分镜剧本</a>
+        <button class="text-button" type="button" data-script-adapt>{% if has_storyboard_script %}再次改造{% else %}剧本改造{% endif %}</button>
       </nav>
 
       {% if section == "script" %}
@@ -95,55 +97,43 @@
               {% endif %}
             </section>
 
+            <aside class="script-storyboard-panel">
+              <div class="script-editor-toolbar">
+                <h3>分镜剧本</h3>
+              </div>
+              <section class="script-article-card script-storyboard-card" data-storyboard-script-display>
+                {% if has_storyboard_script %}
+                  {% for paragraph in storyboard_script.adapted_article.split("\n\n") %}
+                    {% if paragraph.strip() %}
+                      <p>{{ paragraph }}</p>
+                    {% endif %}
+                  {% endfor %}
+                {% else %}
+                  <p class="muted-text">尚未生成分镜剧本。</p>
+                {% endif %}
+              </section>
+              {% if storyboard_script.adapted_segments %}
+                <section class="script-structure-card script-storyboard-segments">
+                  <h3>分镜段落</h3>
+                  {% for segment in storyboard_script.adapted_segments %}
+                    <article>
+                      <strong>{{ segment.dramatic_function or segment.segment_id }}</strong>
+                      <p>{{ segment.visual_progression or segment.visual_goal }}</p>
+                      {% if segment.scene_intent %}
+                        <span>{{ segment.scene_intent }}</span>
+                      {% endif %}
+                    </article>
+                  {% endfor %}
+                </section>
+              {% endif %}
+              <div class="script-editor-status" data-script-adapt-status></div>
+            </aside>
           </div>
         </article>
-      {% elif section == "subjects" %}
-        <section class="script-subject-page">
-          {% if generation.subjects %}
-            {% for subject in generation.subjects %}
-              <article class="subject-row">
-                <div>
-                  <span>{{ subject.type }}</span>
-                  <strong>{{ subject.name }}</strong>
-                </div>
-                <p>{{ subject.intro }}</p>
-                <p>{{ subject.visual_modeling }}</p>
-                <p>{{ subject.script_usage }}</p>
-              </article>
-            {% endfor %}
-          {% else %}
-            <div class="empty-record">主体尚未生成，可在需要时单独生成。</div>
-          {% endif %}
-        </section>
-      {% else %}
-        <section class="script-map-page">
-          {% if generation.map_shots %}
-            {% for shot in generation.map_shots %}
-              <article class="map-shot-card">
-                {% if shot.map_render_url %}
-                  <img class="map-shot-image" src="{{ shot.map_render_url }}" alt="{{ shot.title }}" loading="lazy">
-                {% else %}
-                  <div class="map-shot-preview">{{ shot.region }}</div>
-                {% endif %}
-                <div>
-                  <h3>{{ shot.title }}</h3>
-                  <p>{{ shot.description }}</p>
-                  <div class="map-shot-places">
-                    {% for place in shot.places %}
-                      <span>{{ place }}</span>
-                    {% endfor %}
-                  </div>
-                </div>
-              </article>
-            {% endfor %}
-          {% else %}
-            <div class="empty-record">地点画面尚未生成，可在需要时单独生成。</div>
-          {% endif %}
-        </section>
       {% endif %}
     </main>
     {% if section == "script" %}
-      <script src="{{ url_for('static', filename='script_reader.js') }}?v=20260627c"></script>
+      <script src="{{ url_for('static', filename='script_reader.js') }}?v=20260630a"></script>
     {% endif %}
   </body>
 </html>

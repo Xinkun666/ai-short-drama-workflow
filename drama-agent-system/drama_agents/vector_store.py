@@ -39,7 +39,7 @@ class LocalVectorStore:
                     text TEXT NOT NULL,
                     metadata_json TEXT NOT NULL DEFAULT '{}',
                     vector_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime'))
                 )
                 """
             )
@@ -89,7 +89,7 @@ class LocalVectorStore:
             """
             INSERT INTO rag_chunks (
                 chunk_id, record_id, source_type, source_ref, title, text, metadata_json, vector_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')))
             ON CONFLICT(chunk_id) DO UPDATE SET
                 record_id=excluded.record_id,
                 source_type=excluded.source_type,
@@ -98,7 +98,7 @@ class LocalVectorStore:
                 text=excluded.text,
                 metadata_json=excluded.metadata_json,
                 vector_json=excluded.vector_json,
-                updated_at=CURRENT_TIMESTAMP
+                updated_at=(strftime('%Y%m%d %H%M','now','localtime'))
             """,
             rows,
         )

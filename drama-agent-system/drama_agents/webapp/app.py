@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -17,7 +18,7 @@ from drama_agents.map_api import REGIONS, clamp_int, ensure_default_data, parse_
 from drama_agents.material_splitter import MaterialSplitter, SUPPORTED_MATERIAL_EXTENSIONS, slugify
 from drama_agents.script_agent import ScriptAgent, render_script_markdown
 from drama_agents.script_assistant import ScriptAssistantController
-from drama_agents.storage import MaterialDatabase, group_visual_scenes
+from drama_agents.storage import MaterialDatabase, current_timestamp, group_visual_scenes
 from drama_agents.storyboard_agent import StoryboardAgent
 from drama_agents.timeline_builder import TimelineBuilder, result_to_payload as timeline_result_to_payload
 from drama_agents.vector_store import LocalVectorStore, build_material_chunks
@@ -58,6 +59,7 @@ def create_app(
     map_outputs_path = outputs_path / "maps"
     visual_anchor_outputs_path = outputs_path / "visual_subject_anchors"
     visual_scene_anchor_outputs_path = outputs_path / "visual_scene_anchors"
+    storyboard_keyframe_outputs_path = outputs_path / "storyboard_keyframes"
     records_path = outputs_path / "material_records.json"
     database_path = outputs_path / "material_workstation.sqlite3"
     rag_database_path = outputs_path / "material_rag.sqlite3"
@@ -93,6 +95,7 @@ def create_app(
     map_outputs_path.mkdir(parents=True, exist_ok=True)
     visual_anchor_outputs_path.mkdir(parents=True, exist_ok=True)
     visual_scene_anchor_outputs_path.mkdir(parents=True, exist_ok=True)
+    storyboard_keyframe_outputs_path.mkdir(parents=True, exist_ok=True)
 
     app.config["WORKSPACE"] = workspace_path
     app.config["OUTPUTS"] = outputs_path
@@ -103,6 +106,7 @@ def create_app(
     app.config["MAP_OUTPUTS"] = map_outputs_path
     app.config["VISUAL_ANCHOR_OUTPUTS"] = visual_anchor_outputs_path
     app.config["VISUAL_SCENE_ANCHOR_OUTPUTS"] = visual_scene_anchor_outputs_path
+    app.config["STORYBOARD_KEYFRAME_OUTPUTS"] = storyboard_keyframe_outputs_path
     app.config["MATERIAL_RECORDS"] = records_path
     app.config["MATERIAL_DATABASE"] = database_path
     app.config["RAG_DATABASE"] = rag_database_path
@@ -578,6 +582,21 @@ def create_app(
             }
         )
 
+    @app.route("/api/script/generations/<generation_id>/storyboard-script/adapt", methods=["POST"])
+    def adapt_script_for_storyboard(generation_id: str):
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        try:
+            storyboard_script = script_agent.adapt_for_storyboard(generation=generation)
+            updated = database.update_script_storyboard_script(generation_id, storyboard_script)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        return jsonify({"generation": updated, "storyboard_script": updated.get("script", {}).get("storyboard_script") or storyboard_script})
+
     @app.route("/api/script/generations/<generation_id>/storyboard/generate", methods=["POST"])
     def generate_storyboard_from_script(generation_id: str):
         payload = request.get_json(silent=True) or {}
@@ -588,13 +607,14 @@ def create_app(
             abort(404)
         subjects = database.list_script_visual_subjects(generation_id)
         scenes = database.list_script_visual_scenes(generation_id)
+        storyboard_generation, source_type = generation_for_storyboard_agent(generation)
         try:
             storyboard_payload = storyboard_agent.generate(
-                generation=generation,
+                generation=storyboard_generation,
                 subjects=subjects,
                 scenes=scenes,
                 target_duration_sec=target_duration_sec,
-                source_type="script_generation",
+                source_type=source_type,
             )
             storyboard = database.save_storyboard(generation_id, storyboard_payload)
         except RuntimeError as exc:
@@ -664,6 +684,97 @@ def create_app(
         except KeyError:
             abort(404)
         return jsonify({"shot": shot})
+
+    @app.route("/api/storyboards/<storyboard_id>/shots/<shot_id>/candidates", methods=["GET"])
+    def list_storyboard_shot_candidates(storyboard_id: str, shot_id: str):
+        database = MaterialDatabase(database_path)
+        if not database.find_storyboard(storyboard_id):
+            abort(404)
+        if not any(item["shot_id"] == shot_id for item in database.list_storyboard_shots(storyboard_id)):
+            abort(404)
+        return jsonify({"candidates": database.list_storyboard_shot_candidates(storyboard_id, shot_id)})
+
+    @app.route("/api/storyboards/<storyboard_id>/shots/<shot_id>/preparation-state", methods=["GET"])
+    def get_storyboard_shot_preparation_state(storyboard_id: str, shot_id: str):
+        try:
+            state = MaterialDatabase(database_path).build_storyboard_shot_preparation_state(storyboard_id, shot_id)
+        except KeyError:
+            abort(404)
+        return jsonify({"state": state})
+
+    @app.route("/api/storyboards/<storyboard_id>/shots/<shot_id>/candidates/<int:candidate_id>/link", methods=["PATCH"])
+    def link_storyboard_shot_candidate(storyboard_id: str, shot_id: str, candidate_id: int):
+        payload = request.get_json(silent=True) or {}
+        database = MaterialDatabase(database_path)
+        try:
+            candidate = database.mark_storyboard_shot_candidate_linked(
+                storyboard_id,
+                shot_id,
+                candidate_id,
+                linked_entity_id=str(payload.get("linked_entity_id") or ""),
+            )
+            state = database.build_storyboard_shot_preparation_state(storyboard_id, shot_id)
+        except KeyError:
+            abort(404)
+        return jsonify({"candidate": candidate, "state": state})
+
+    @app.route("/api/storyboards/<storyboard_id>/shots/<shot_id>/candidates/<int:candidate_id>/ignore", methods=["PATCH"])
+    def ignore_storyboard_shot_candidate(storyboard_id: str, shot_id: str, candidate_id: int):
+        database = MaterialDatabase(database_path)
+        try:
+            candidate = database.mark_storyboard_shot_candidate_ignored(storyboard_id, shot_id, candidate_id)
+            state = database.build_storyboard_shot_preparation_state(storyboard_id, shot_id)
+        except KeyError:
+            abort(404)
+        return jsonify({"candidate": candidate, "state": state})
+
+    @app.route("/api/storyboards/<storyboard_id>/shots/<shot_id>/keyframe", methods=["POST"])
+    def create_storyboard_shot_keyframe(storyboard_id: str, shot_id: str):
+        database = MaterialDatabase(database_path)
+        storyboard = database.find_storyboard(storyboard_id)
+        if not storyboard:
+            abort(404)
+        shots = database.list_storyboard_shots(storyboard_id)
+        shot = next((item for item in shots if item["shot_id"] == shot_id), None)
+        if not shot:
+            abort(404)
+        previous_shot = next((item for item in shots if item["shot_id"] == shot.get("prev_shot_id")), None)
+        reference_images = storyboard_keyframe_reference_images(previous_shot, outputs_path)
+        payload = request.get_json(silent=True) or {}
+        try:
+            keyframe = visual_anchor_agent.generate_storyboard_keyframe(
+                shot=shot,
+                output_dir=storyboard_keyframe_outputs_path,
+                prompt=payload.get("prompt"),
+                negative_prompt=payload.get("negative_prompt") if "negative_prompt" in payload else None,
+                reference_images=reference_images,
+            )
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 500
+        asset_url = output_link(Path(keyframe["asset_path"]), outputs_path)
+        updated = database.update_storyboard_shot(
+            storyboard_id,
+            shot_id,
+            {
+                "keyframe_asset_id": asset_url,
+                "asset_status": "keyframe_ready",
+                "keyframe_prompt": keyframe["prompt"],
+                "negative_prompt": keyframe["negative_prompt"],
+            },
+        )
+        return jsonify(
+            {
+                "storyboard_id": storyboard_id,
+                "shot_id": shot_id,
+                "status": "completed",
+                "provider": keyframe["provider"],
+                "model": keyframe["model"],
+                "asset_url": asset_url,
+                "reference_image_count": len(reference_images),
+                "shot": updated,
+                "message": "镜头关键帧已生成，并已写入分镜镜头记录。",
+            }
+        )
 
     @app.route("/api/storyboards/<storyboard_id>", methods=["DELETE"])
     def delete_storyboard(storyboard_id: str):
@@ -820,21 +931,16 @@ def create_app(
 
     @app.route("/script-generations/<generation_id>/<section>", methods=["GET"])
     def script_generation_view(generation_id: str, section: str):
-        if section not in {"script", "subjects", "maps"}:
+        if section != "script":
             abort(404)
         generation = MaterialDatabase(database_path).find_script_generation(generation_id)
         if not generation:
             abort(404)
-        section_titles = {
-            "script": "剧本阅读器",
-            "subjects": "主体查看",
-            "maps": "地点画面",
-        }
         return render_template(
             "script_generation_view.html",
             generation=generation,
             section=section,
-            section_title=section_titles[section],
+            section_title="剧本阅读器",
         )
 
     @app.route("/storyboards/<storyboard_id>", methods=["GET"])
@@ -976,7 +1082,7 @@ def script_generation_from_uploaded_text(path: Path, text: str) -> dict:
         "generation_id": generation_id,
         "status": "uploaded",
         "message": "上传剧本已进入主体解析工作台。",
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "created_at": current_timestamp(),
         "topic": topic,
         "time_range": str(payload.get("time_range") or ""),
         "time_start_year": payload.get("time_start_year"),
@@ -1219,7 +1325,7 @@ def create_parse_record(result_data: dict, source: Path, workspace: Path, refine
     refinement_data = refinement_data or {}
     return {
         "record_id": record_id,
-        "parsed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "parsed_at": current_timestamp(),
         "book_name": source.name,
         "source_relative_path": source.relative_to(workspace).as_posix(),
         "page_count": result_data.get("page_count", 0),
@@ -1372,6 +1478,68 @@ def raw_reader_payload(chapter: dict) -> dict:
 
 def output_link(path: Path, outputs: Path) -> str:
     return f"/outputs/{path.relative_to(outputs).as_posix()}"
+
+
+def generation_for_storyboard_agent(generation: dict) -> tuple[dict, str]:
+    script = generation.get("script") if isinstance(generation.get("script"), dict) else {}
+    storyboard_script = script.get("storyboard_script") if isinstance(script.get("storyboard_script"), dict) else {}
+    adapted_article = str(storyboard_script.get("adapted_article") or "").strip()
+    if not adapted_article:
+        return generation, "script_generation"
+    next_generation = dict(generation)
+    next_script = dict(script)
+    next_script["original_article"] = script.get("article", "")
+    next_script["article"] = adapted_article
+    next_script["storyboard_script"] = storyboard_script
+    next_script["adapted_segments"] = storyboard_script.get("adapted_segments") or []
+    if storyboard_script.get("title"):
+        next_script["title"] = storyboard_script["title"]
+    next_generation["script"] = next_script
+    return next_generation, "storyboard_script"
+
+
+def storyboard_keyframe_reference_images(previous_shot: dict | None, outputs: Path) -> list[str]:
+    if not previous_shot:
+        return []
+    asset_id = str(previous_shot.get("keyframe_asset_id") or "").strip()
+    if not asset_id:
+        return []
+    asset_path = resolve_output_asset_path(asset_id, outputs)
+    if not asset_path or not asset_path.exists() or not asset_path.is_file():
+        return []
+    return [image_file_to_data_url(asset_path)]
+
+
+def resolve_output_asset_path(asset_id: str, outputs: Path) -> Path | None:
+    value = str(asset_id or "").strip()
+    if not value:
+        return None
+    outputs_root = outputs.resolve()
+    if value.startswith("/outputs/"):
+        candidate = (outputs_root / value.removeprefix("/outputs/")).resolve()
+    elif value.startswith("outputs/"):
+        candidate = (outputs_root / value.removeprefix("outputs/")).resolve()
+    else:
+        path = Path(value)
+        candidate = path.resolve() if path.is_absolute() else (outputs_root / path).resolve()
+    if candidate != outputs_root and outputs_root not in candidate.parents:
+        return None
+    return candidate
+
+
+def image_file_to_data_url(path: Path) -> str:
+    mime_type = image_mime_type(path)
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def image_mime_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    return "image/png"
 
 
 def relative_or_absolute(path: Path, root: Path) -> str:

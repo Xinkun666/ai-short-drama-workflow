@@ -4,7 +4,8 @@ import json
 from io import BytesIO
 
 from drama_agents.storage import MaterialDatabase
-from drama_agents.storyboard_agent import RuleBasedStoryboardProvider, StoryboardAgent
+from drama_agents.storyboard_agent import DeepSeekStoryboardProvider, RuleBasedStoryboardProvider, StoryboardAgent
+from drama_agents.visual_anchor_agent import build_subject_anchor_prompt
 from drama_agents.webapp.app import create_app
 
 
@@ -122,6 +123,26 @@ def generate_storyboard(database: MaterialDatabase) -> dict:
     )
 
 
+class FakeKeyframeProvider:
+    def __init__(self):
+        self.calls = []
+
+    def generate_image(self, *, prompt, negative_prompt, reference_images=None):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "reference_images": list(reference_images or []),
+            }
+        )
+        return {
+            "image_bytes": b"fake-keyframe-image",
+            "mime_type": "image/png",
+            "model": "fake-seedream",
+            "provider": "ark",
+        }
+
+
 def test_storyboard_agent_preserves_full_script_coverage(tmp_path):
     storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
     shots = storyboard["shots"]
@@ -173,7 +194,101 @@ def test_storyboard_agent_generates_seedream_keyframe_prompt(tmp_path):
         assert shot["keyframe_prompt"]
         assert "历史科普卡通短剧风格" in shot["keyframe_prompt"]
         assert "首帧" in shot["keyframe_prompt"] or "画面" in shot["keyframe_prompt"]
+        assert "16:9 横版" in shot["keyframe_prompt"]
+        assert "固定 1280 * 720" in shot["keyframe_prompt"]
+        assert "1920x1080" not in shot["keyframe_prompt"]
+        assert "到 1080p" not in shot["keyframe_prompt"]
+        assert "或 1920x1080" not in shot["keyframe_prompt"]
+        assert "不要 1080p、2K、4K" in shot["keyframe_prompt"]
         assert "镜头缓慢推进" not in shot["keyframe_prompt"]
+
+
+def test_storyboard_keyframe_prompt_does_not_reuse_subject_anchor_task_prompt(tmp_path):
+    database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
+    generation, subjects, scenes = seed_generation_with_assets(database)
+    subjects[0]["visual_prompt"] = build_subject_anchor_prompt(
+        {
+            "canonical_name": "智人",
+            "subject_type": "species",
+            "short_description": "现代人类的祖先。",
+            "visual_identity": {
+                "era": "旧石器时代中晚期",
+                "region": "非洲东部",
+                "appearance": "深色皮肤，身材较纤细。",
+                "clothing": "简单兽皮披挂。",
+                "props": ["木矛"],
+            },
+            "consistency_rules": {"must_keep": ["深色皮肤", "纤细体型"]},
+        }
+    )
+
+    storyboard = StoryboardAgent(RuleBasedStoryboardProvider()).generate(
+        generation=generation,
+        subjects=subjects,
+        scenes=scenes,
+        target_duration_sec=90,
+    )
+    prompt = next(shot["keyframe_prompt"] for shot in storyboard["shots"] if "智人" in shot["subject_names"])
+
+    assert "参考主体一致性：智人" in prompt
+    assert "主体锚点图" not in prompt
+    assert "纯主体参考图" not in prompt
+    assert "只生成一个主体" not in prompt
+
+
+def test_storyboard_keyframe_prompt_explains_frame_progression(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+
+    for index, shot in enumerate(storyboard["shots"]):
+        assert "本帧剧情任务：" in shot["keyframe_prompt"]
+        if index > 0:
+            assert "相对上一帧变化：" in shot["keyframe_prompt"]
+
+
+def test_storyboard_replaces_generic_visual_goals_with_specific_story_beats(tmp_path):
+    class GenericGoalProvider(RuleBasedStoryboardProvider):
+        def generate_storyboard(self, payload):
+            subject_id = payload["provided_subjects"][0]["subject_id"]
+            return {
+                "storyboard": {
+                    "title": "泛化目标测试",
+                    "shots": [
+                        {
+                            "shot_index": 1,
+                            "narration": "这群动物的学名叫智人。",
+                            "subtitle_text": "这群动物的学名叫智人。",
+                            "shot_type": "narrative_shot",
+                            "visual_goal": "推进旁白叙事",
+                            "subject_ids": [subject_id],
+                        },
+                        {
+                            "shot_index": 2,
+                            "narration": "别被这个名字骗了，他们不是某种和我们无关的远古怪物。",
+                            "subtitle_text": "别被这个名字骗了，他们不是某种和我们无关的远古怪物。",
+                            "shot_type": "narrative_shot",
+                            "visual_goal": "推进旁白叙事",
+                            "subject_ids": [subject_id],
+                        },
+                    ],
+                }
+            }
+
+    database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
+    generation, subjects, scenes = seed_generation_with_assets(database)
+
+    storyboard = StoryboardAgent(GenericGoalProvider()).generate(
+        generation=generation,
+        subjects=subjects,
+        scenes=scenes,
+        target_duration_sec=90,
+    )
+    first_prompt = storyboard["shots"][0]["keyframe_prompt"]
+    second_prompt = storyboard["shots"][1]["keyframe_prompt"]
+
+    assert "旁白对应画面：推进旁白叙事。" not in first_prompt
+    assert "完成身份揭示" in first_prompt
+    assert "纠正误解" in second_prompt
+    assert first_prompt != second_prompt
 
 
 def test_storyboard_agent_generates_video_prompt(tmp_path):
@@ -214,6 +329,306 @@ def test_storyboard_agent_derives_duration_from_content_when_no_target(tmp_path)
     assert not any("目标时长" in note for note in storyboard["review_notes"])
 
 
+def test_storyboard_has_coverage_json(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+
+    assert storyboard["coverage"]["coverage_ratio"] >= 0.9
+    assert storyboard["coverage"]["paragraph_count"] >= 1
+    assert storyboard["coverage"]["covered_paragraph_count"] == storyboard["coverage"]["paragraph_count"]
+    assert "coverage_ratio" in storyboard["coverage"]
+
+
+def test_storyboard_shots_have_source_spans(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+
+    for shot in storyboard["shots"]:
+        if shot["is_supplemental"]:
+            continue
+        assert shot["source_paragraph_index"] >= 1
+        assert shot["source_text_start"] >= 0
+        assert shot["source_text_end"] > shot["source_text_start"]
+        assert shot["source_excerpt"]
+        assert shot["source_excerpt"] in sample_generation()["script"]["article"]
+
+
+def test_supplemental_shots_are_marked(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+    supplemental = [shot for shot in storyboard["shots"] if shot["is_supplemental"]]
+
+    assert supplemental
+    assert any(shot["shot_type"] in {"map_shot", "concept_shot", "transition_shot"} for shot in supplemental)
+    assert all(shot["supplemental_reason"] for shot in supplemental)
+    assert storyboard["coverage"]["supplemental_shot_count"] == len(supplemental)
+
+
+def test_storyboard_has_sequences_and_beats(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+
+    assert all(shot["sequence_id"] for shot in storyboard["shots"])
+    assert all(shot["sequence_title"] for shot in storyboard["shots"])
+    assert all(shot["beat_id"] for shot in storyboard["shots"])
+    assert all(shot["beat_title"] for shot in storyboard["shots"])
+    assert storyboard["shots"][0]["next_shot_id"] == storyboard["shots"][1]["shot_id"]
+    assert storyboard["shots"][1]["prev_shot_id"] == storyboard["shots"][0]["shot_id"]
+
+
+def test_storyboard_has_main_scene_blocks_with_shot_membership(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+    scene_blocks = storyboard["scene_blocks"]
+    scene_block_ids = {block["scene_block_id"] for block in scene_blocks}
+
+    assert 3 <= len(scene_blocks) <= 8
+    assert len(scene_blocks) < len(storyboard["shots"])
+    assert all(block["title"] for block in scene_blocks)
+    assert all(block["source_excerpt"] for block in scene_blocks)
+    assert all(block["key_beats"] for block in scene_blocks)
+    assert all(shot["scene_block_id"] in scene_block_ids for shot in storyboard["shots"])
+    assert max(block["shot_count"] for block in scene_blocks) > 1
+    assert storyboard["shots"][0]["sequence_id"] == storyboard["shots"][0]["scene_block_id"]
+    assert storyboard["shots"][0]["sequence_title"] == storyboard["shots"][0]["scene_block_title"]
+
+
+def test_storyboard_shots_have_continuity(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+
+    for shot in storyboard["shots"]:
+        continuity = shot["continuity"]
+        assert continuity["previous_shot_relation"]
+        assert continuity["screen_direction"]
+        assert continuity["continuity_axis"]
+        assert "spatial_continuity_note" in continuity
+        assert "visual_bridge" in continuity
+
+
+def test_storyboard_keyframe_prompts_include_neighbor_continuity(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+    shots = storyboard["shots"]
+    shots_by_id = {shot["shot_id"]: shot for shot in shots}
+    shot = next(
+        item
+        for item in shots
+        if item["prev_shot_id"] and item["scene_block_id"] == shots_by_id[item["prev_shot_id"]]["scene_block_id"]
+    )
+    previous = shots_by_id[shot["prev_shot_id"]]
+
+    assert "上一镜头承接" in shot["keyframe_prompt"]
+    assert previous["scene_block_title"] in shot["keyframe_prompt"]
+    assert "主场景内连续" in shot["keyframe_prompt"]
+    assert "画面连续性" in shot["keyframe_prompt"]
+
+
+def test_storyboard_scene_block_boundaries_choose_transition_methods(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+    shots = storyboard["shots"]
+    shots_by_id = {shot["shot_id"]: shot for shot in shots}
+    boundary_shots = [
+        shot
+        for shot in shots
+        if shot["prev_shot_id"] and shot["scene_block_id"] != shots_by_id[shot["prev_shot_id"]]["scene_block_id"]
+    ]
+
+    assert boundary_shots
+    for shot in boundary_shots:
+        previous = shots_by_id[shot["prev_shot_id"]]
+        continuity = shot["continuity"]
+        assert shot["transition"] in {"map_transition", "narration_bridge", "visual_bridge", "concept_bridge"}
+        assert continuity["transition_method"] == shot["transition"]
+        assert continuity["previous_scene_block_title"] == previous["scene_block_title"]
+        assert continuity["current_scene_block_title"] == shot["scene_block_title"]
+        assert continuity["transition_guidance"]
+
+
+def test_storyboard_shots_have_production_plan(tmp_path):
+    storyboard = generate_storyboard(MaterialDatabase(tmp_path / "storyboard.sqlite3"))
+
+    for shot in storyboard["shots"]:
+        production_plan = shot["production_plan"]
+        assert production_plan["render_method"]
+        assert production_plan["cost_tier"] in {"low", "medium", "high"}
+        assert isinstance(production_plan["needs_keyframe"], bool)
+        assert isinstance(production_plan["needs_video"], bool)
+        assert production_plan["recommended_tool"]
+        assert production_plan["reason"]
+    assert next(shot for shot in storyboard["shots"] if shot["shot_type"] == "map_shot")["production_plan"]["render_method"] == "map_animation"
+
+
+def test_storyboard_prompt_parts_are_saved(tmp_path):
+    database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
+    generation, _subjects, _scenes = seed_generation_with_assets(database)
+    storyboard = generate_storyboard(database)
+    saved = database.save_storyboard(generation["generation_id"], storyboard)
+    shots = database.list_storyboard_shots(saved["storyboard_id"])
+
+    for shot in shots:
+        prompt_parts = shot["prompt_parts"]
+        assert prompt_parts["style_prompt"]
+        assert prompt_parts["scene_prompt"]
+        assert prompt_parts["composition_prompt"]
+        assert prompt_parts["frame_size_prompt"]
+        assert prompt_parts["negative_prompt"]
+        assert prompt_parts["style_prompt"] in shot["keyframe_prompt"]
+        assert prompt_parts["frame_size_prompt"] in shot["keyframe_prompt"]
+
+
+def test_deepseek_bad_json_repairs_before_fallback(monkeypatch):
+    monkeypatch.setenv("STORYBOARD_CHUNK_FIRST_MIN_CHARS", "99999")
+    monkeypatch.setenv("STORYBOARD_CHUNK_FIRST_MIN_PARAGRAPHS", "99999")
+
+    class RepairingStoryboardProvider(DeepSeekStoryboardProvider):
+        def __init__(self):
+            self.calls = []
+
+        def _post_chat(self, messages, *, max_tokens):
+            self.calls.append(messages[-1]["content"])
+            if len(self.calls) == 1:
+                return '{"storyboard": {"shots": ['
+            return json.dumps(
+                {
+                    "storyboard": {
+                        "title": "修复后的分镜",
+                        "shots": [
+                            {
+                                "shot_index": 1,
+                                "narration": "智人开局，装备一般，但故事系统已经上线。",
+                                "subtitle_text": "智人开局，装备一般，但故事系统已经上线。",
+                                "shot_type": "hook_shot",
+                                "visual_goal": "开场",
+                                "duration_sec": 4,
+                            }
+                        ],
+                    }
+                },
+                ensure_ascii=False,
+            )
+
+    provider = RepairingStoryboardProvider()
+    payload = provider.generate_storyboard({"full_script": sample_generation()["script"]["article"], "provided_subjects": [], "provided_scenes": []})
+
+    assert len(provider.calls) == 2
+    assert "修复" in provider.calls[1]
+    assert payload["storyboard"]["title"] == "修复后的分镜"
+
+
+def test_deepseek_long_scripts_use_chunked_generation_first():
+    class ChunkFirstProvider(DeepSeekStoryboardProvider):
+        def __init__(self):
+            self.used_chunked = False
+
+        def _post_chat(self, messages, *, max_tokens):
+            raise AssertionError("long scripts should not use one monolithic storyboard call")
+
+        def generate_storyboard_chunks(self, payload):
+            self.used_chunked = True
+            return {"storyboard": {"title": "分段分镜", "shots": [{"narration": "第一段。", "duration_sec": 4}]}}
+
+    provider = ChunkFirstProvider()
+    payload = {"full_script": "很长的一段剧本。" * 260, "provided_subjects": [], "provided_scenes": []}
+
+    result = provider.generate_storyboard(payload)
+
+    assert provider.used_chunked
+    assert result["storyboard"]["title"] == "分段分镜"
+
+
+def test_deepseek_chunk_generation_maps_source_paragraphs():
+    class ChunkSourceProvider(DeepSeekStoryboardProvider):
+        def __init__(self):
+            self.calls = 0
+
+        def _post_chat(self, messages, *, max_tokens):
+            self.calls += 1
+            return json.dumps(
+                {
+                    "storyboard": {
+                        "shots": [
+                            {
+                                "narration": f"第 {self.calls} 段镜头。",
+                                "source_paragraph_index": 1,
+                                "duration_sec": 4,
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+
+    provider = ChunkSourceProvider()
+    result = provider.generate_storyboard_chunks({"full_script": "第一段。\n\n第二段。"})
+
+    assert [shot["source_paragraph_index"] for shot in result["storyboard"]["shots"]] == [1, 2]
+
+
+def test_rule_based_fallback_sets_needs_review(tmp_path):
+    class BrokenStoryboardProvider:
+        def generate_storyboard(self, payload):
+            raise json.JSONDecodeError("bad", "{", 0)
+
+        def repair_storyboard_json(self, content):
+            raise json.JSONDecodeError("bad repair", "{", 0)
+
+        def generate_storyboard_chunks(self, payload):
+            raise json.JSONDecodeError("bad chunks", "{", 0)
+
+    database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
+    generation, subjects, scenes = seed_generation_with_assets(database)
+    storyboard = StoryboardAgent(BrokenStoryboardProvider()).generate(
+        generation=generation,
+        subjects=subjects,
+        scenes=scenes,
+    )
+
+    assert storyboard["status"] == "needs_review"
+    assert any("本地规则分镜兜底" in note for note in storyboard["review_notes"])
+    assert storyboard["raw"]["fallback"]["stage"] == "rule_based"
+
+
+def test_compressed_llm_storyboard_uses_quality_fallback(tmp_path):
+    class CompressedStoryboardProvider:
+        def generate_storyboard(self, payload):
+            paragraphs = [item.strip() for item in payload["full_script"].split("\n\n") if item.strip()]
+            shots = []
+            for index, paragraph in enumerate(paragraphs[:11]):
+                shots.append(
+                    {
+                        "shot_index": index + 1,
+                        "source_paragraph_index": index,
+                        "source_text_start": 0,
+                        "source_text_end": min(len(paragraph), 120),
+                        "source_excerpt": paragraph[:120],
+                        "is_supplemental": False,
+                        "shot_type": "narrative_shot",
+                        "visual_goal": "压缩后的大纲镜头",
+                    }
+                )
+            return {
+                "storyboard": {
+                    "title": "压缩分镜",
+                    "coverage": {
+                        "total_shots": 42,
+                        "paragraphs_covered": "0-10",
+                        "estimated_total_duration_seconds": 150,
+                    },
+                    "review_notes": [],
+                    "shots": shots,
+                }
+            }
+
+    database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
+    generation, subjects, scenes = seed_generation_with_assets(database)
+
+    storyboard = StoryboardAgent(CompressedStoryboardProvider()).generate(
+        generation=generation,
+        subjects=subjects,
+        scenes=scenes,
+    )
+
+    assert len(storyboard["shots"]) > 11
+    assert storyboard["actual_duration_sec"] > 44
+    assert storyboard["coverage"]["coverage_ratio"] >= 0.9
+    assert storyboard["status"] == "needs_review"
+    assert any("分镜过度压缩" in note for note in storyboard["review_notes"])
+
+
 def test_save_storyboard_creates_records_and_shots(tmp_path):
     database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
     generation, _subjects, _scenes = seed_generation_with_assets(database)
@@ -223,10 +638,86 @@ def test_save_storyboard_creates_records_and_shots(tmp_path):
 
     assert saved["storyboard_id"]
     assert saved["shot_count"] == len(storyboard["shots"])
+    assert saved["coverage"]["coverage_ratio"] >= 0.9
+    assert saved["script_feedback"] == storyboard["script_feedback"]
+    assert saved["scene_blocks"] == storyboard["scene_blocks"]
     assert saved["actual_duration_sec"] == sum(shot["duration_sec"] for shot in storyboard["shots"])
     assert database.find_storyboard(saved["storyboard_id"])["title"] == saved["title"]
-    assert len(database.list_storyboard_shots(saved["storyboard_id"])) == saved["shot_count"]
+    saved_shots = database.list_storyboard_shots(saved["storyboard_id"])
+    assert len(saved_shots) == saved["shot_count"]
+    assert all(shot["scene_block_id"] for shot in saved_shots)
     assert database.list_storyboards(generation["generation_id"])[0]["storyboard_id"] == saved["storyboard_id"]
+
+
+def test_save_storyboard_creates_asset_candidates_and_preparation_state(tmp_path):
+    database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
+    generation, _subjects, _scenes = seed_generation_with_assets(database)
+    storyboard = generate_storyboard(database)
+
+    saved = database.save_storyboard(generation["generation_id"], storyboard)
+    shots = database.list_storyboard_shots(saved["storyboard_id"])
+    shot = next(item for item in shots if item["visual_elements"])
+    all_candidates = database.list_storyboard_shot_candidates(saved["storyboard_id"])
+    candidates = database.list_storyboard_shot_candidates(saved["storyboard_id"], shot["shot_id"])
+
+    assert candidates
+    assert any(item["candidate_type"] == "scene" and item["candidate_status"] == "linked" for item in all_candidates)
+    assert any(item["candidate_type"] == "subject" and item["candidate_status"] == "linked" for item in all_candidates)
+    assert any(item["candidate_type"] == "visual_element" and item["candidate_status"] == "pending" for item in candidates)
+
+    state = database.build_storyboard_shot_preparation_state(saved["storyboard_id"], shot["shot_id"])
+
+    assert state["shot"]["shot_id"] == shot["shot_id"]
+    assert state["candidate_count"] == len(candidates)
+    assert state["pending_candidate_count"] == len([item for item in candidates if item["candidate_status"] == "pending"])
+    assert state["prompt_ready"] is True
+    assert state["ready_for_keyframe"] is False
+
+
+def test_storyboard_candidate_sync_preserves_confirmed_status(tmp_path):
+    database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
+    generation, _subjects, _scenes = seed_generation_with_assets(database)
+    storyboard = generate_storyboard(database)
+    saved = database.save_storyboard(generation["generation_id"], storyboard)
+    shot = next(item for item in database.list_storyboard_shots(saved["storyboard_id"]) if item["visual_elements"])
+    pending = next(
+        item
+        for item in database.list_storyboard_shot_candidates(saved["storyboard_id"], shot["shot_id"])
+        if item["candidate_status"] == "pending"
+    )
+
+    database.mark_storyboard_shot_candidate_linked(
+        saved["storyboard_id"],
+        shot["shot_id"],
+        pending["candidate_id"],
+        linked_entity_id="manual-prop-anchor-1",
+    )
+    storyboard["storyboard_id"] = saved["storyboard_id"]
+    database.save_storyboard(generation["generation_id"], storyboard)
+
+    synced = database.list_storyboard_shot_candidates(saved["storyboard_id"], shot["shot_id"])
+    preserved = next(item for item in synced if item["candidate_id"] == pending["candidate_id"])
+    assert preserved["candidate_status"] == "linked"
+    assert preserved["linked_entity_id"] == "manual-prop-anchor-1"
+
+
+def test_storyboard_preparation_state_ready_after_candidates_confirmed(tmp_path):
+    database = MaterialDatabase(tmp_path / "storyboard.sqlite3")
+    generation, _subjects, _scenes = seed_generation_with_assets(database)
+    storyboard = generate_storyboard(database)
+    saved = database.save_storyboard(generation["generation_id"], storyboard)
+    shot = next(item for item in database.list_storyboard_shots(saved["storyboard_id"]) if item["visual_elements"])
+
+    for candidate in database.list_storyboard_shot_candidates(saved["storyboard_id"], shot["shot_id"]):
+        if candidate["candidate_status"] == "pending":
+            database.mark_storyboard_shot_candidate_ignored(saved["storyboard_id"], shot["shot_id"], candidate["candidate_id"])
+
+    state = database.build_storyboard_shot_preparation_state(saved["storyboard_id"], shot["shot_id"])
+
+    assert state["pending_candidate_count"] == 0
+    assert state["basic_info_ready"] is True
+    assert state["prompt_ready"] is True
+    assert state["ready_for_keyframe"] is True
 
 
 def test_storyboard_api_generate_from_script(tmp_path):
@@ -242,6 +733,8 @@ def test_storyboard_api_generate_from_script(tmp_path):
     assert payload["storyboard"]["storyboard_id"]
     assert payload["storyboard"]["shot_count"] == len(payload["shots"])
     assert payload["storyboard"]["target_duration_sec"] == round(payload["storyboard"]["actual_duration_sec"])
+    assert payload["storyboard"]["scene_blocks"]
+    assert payload["shots"][0]["scene_block_id"]
     assert payload["shots"][0]["keyframe_prompt"]
     assert client.get(f"/api/storyboards/{payload['storyboard']['storyboard_id']}").status_code == 200
 
@@ -322,6 +815,43 @@ def test_storyboard_shot_patch_updates_prompt(tmp_path):
     updated = response.get_json()["shot"]
     assert updated["keyframe_prompt"] == "用户修改后的 Seedream 首帧 prompt"
     assert updated["scene_id"] == scene_id
+    assert "production_plan" in updated
+    assert "prompt_parts" in updated
+
+
+def test_storyboard_candidate_api_links_and_ignores_candidates(tmp_path):
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", storyboard_provider=RuleBasedStoryboardProvider())
+    client = app.test_client()
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    generation, _subjects, _scenes = seed_generation_with_assets(database)
+    created = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard/generate").get_json()
+    storyboard_id = created["storyboard"]["storyboard_id"]
+    shot = next(item for item in created["shots"] if item["visual_elements"])
+
+    candidates_response = client.get(f"/api/storyboards/{storyboard_id}/shots/{shot['shot_id']}/candidates")
+    assert candidates_response.status_code == 200
+    candidates = candidates_response.get_json()["candidates"]
+    pending_candidates = [item for item in candidates if item["candidate_status"] == "pending"]
+    assert pending_candidates
+
+    link_response = client.patch(
+        f"/api/storyboards/{storyboard_id}/shots/{shot['shot_id']}/candidates/{pending_candidates[0]['candidate_id']}/link",
+        json={"linked_entity_id": "manual-prop-anchor-api"},
+    )
+    assert link_response.status_code == 200
+    assert link_response.get_json()["candidate"]["candidate_status"] == "linked"
+    assert link_response.get_json()["candidate"]["linked_entity_id"] == "manual-prop-anchor-api"
+
+    if len(pending_candidates) > 1:
+        ignore_response = client.patch(
+            f"/api/storyboards/{storyboard_id}/shots/{shot['shot_id']}/candidates/{pending_candidates[1]['candidate_id']}/ignore"
+        )
+        assert ignore_response.status_code == 200
+        assert ignore_response.get_json()["candidate"]["candidate_status"] == "ignored"
+
+    state_response = client.get(f"/api/storyboards/{storyboard_id}/shots/{shot['shot_id']}/preparation-state")
+    assert state_response.status_code == 200
+    assert state_response.get_json()["state"]["candidate_count"] == len(candidates)
 
 
 def test_existing_subject_and_scene_pool_not_modified_by_storyboard(tmp_path):
@@ -374,7 +904,93 @@ def test_storyboard_detail_page_renders_shot_editor(tmp_path):
     assert "分镜详情" in html
     assert "storyboardShotList" in html
     assert "storyboardShotEditor" in html
+    assert "storyboardCoverageSummary" in html
+    assert "storyboardShotCandidates" in html
+    assert "storyboardPreparationStatus" in html
+    assert "候选确认" in html
+    assert "主场景结构" in html
+    assert "storyboard-scene-block-strip" in html
+    assert "storyboard-main-scene-head" in html
+    assert "source_excerpt" in html
+    assert "continuity" in html
+    assert "production_plan" in html
+    assert "prompt_parts" in html
     assert "keyframe_prompt" in html
     assert "video_prompt" in html
     assert "生成本镜头关键帧" in html
     assert f"/api/storyboards/{storyboard_id}/shots/" in html
+
+
+def test_storyboard_detail_has_top_batch_keyframe_progress(tmp_path):
+    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", storyboard_provider=RuleBasedStoryboardProvider())
+    client = app.test_client()
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    generation, _subjects, _scenes = seed_generation_with_assets(database)
+    created = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard/generate").get_json()
+    storyboard_id = created["storyboard"]["storyboard_id"]
+
+    html = client.get(f"/storyboards/{storyboard_id}").get_data(as_text=True)
+    header = html[html.index('class="storyboard-detail-actions"') : html.index("</header>")]
+
+    assert 'id="batchKeyframeButton"' in header
+    assert "批量生成关键帧" in header
+    assert "storyboardKeyframeBatchPanel" in html
+    assert "storyboardKeyframeProgressFill" in html
+    assert "storyboardKeyframeProgressList" in html
+
+
+def test_storyboard_shot_keyframe_api_generates_and_saves_asset(tmp_path):
+    provider = FakeKeyframeProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        anchor_provider=provider,
+        storyboard_provider=RuleBasedStoryboardProvider(),
+    )
+    client = app.test_client()
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    generation, _subjects, _scenes = seed_generation_with_assets(database)
+    created = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard/generate").get_json()
+    storyboard_id = created["storyboard"]["storyboard_id"]
+    shot = created["shots"][0]
+
+    response = client.post(f"/api/storyboards/{storyboard_id}/shots/{shot['shot_id']}/keyframe")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["status"] == "completed"
+    assert payload["provider"] == "ark"
+    assert payload["model"] == "fake-seedream"
+    assert payload["asset_url"].startswith(f"/outputs/storyboard_keyframes/{storyboard_id}/{shot['shot_id']}/")
+    assert (tmp_path / "outputs" / payload["asset_url"].removeprefix("/outputs/")).read_bytes() == b"fake-keyframe-image"
+    assert provider.calls[0]["prompt"] == shot["keyframe_prompt"]
+    assert provider.calls[0]["negative_prompt"] == shot["negative_prompt"]
+    updated = database.list_storyboard_shots(storyboard_id)[0]
+    assert updated["keyframe_asset_id"] == payload["asset_url"]
+    assert updated["asset_status"] == "keyframe_ready"
+
+
+def test_storyboard_shot_keyframe_api_uses_previous_keyframe_reference(tmp_path):
+    provider = FakeKeyframeProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        anchor_provider=provider,
+        storyboard_provider=RuleBasedStoryboardProvider(),
+    )
+    client = app.test_client()
+    database = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3")
+    generation, _subjects, _scenes = seed_generation_with_assets(database)
+    created = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard/generate").get_json()
+    storyboard_id = created["storyboard"]["storyboard_id"]
+    first, second = created["shots"][0], created["shots"][1]
+
+    first_response = client.post(f"/api/storyboards/{storyboard_id}/shots/{first['shot_id']}/keyframe")
+    second_response = client.post(f"/api/storyboards/{storyboard_id}/shots/{second['shot_id']}/keyframe")
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert provider.calls[0]["reference_images"] == []
+    assert provider.calls[1]["reference_images"]
+    assert provider.calls[1]["reference_images"][0].startswith("data:image/png;base64,")
+    assert "上一镜头关键帧参考图" in provider.calls[1]["prompt"]

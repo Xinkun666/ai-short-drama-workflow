@@ -127,16 +127,81 @@ class VisualAnchorAgent:
             ),
         }
 
+    def generate_storyboard_keyframe(
+        self,
+        *,
+        shot: dict[str, Any],
+        output_dir: Path | str,
+        prompt: str | None = None,
+        negative_prompt: str | None = None,
+        reference_images: list[str] | None = None,
+    ) -> dict[str, Any]:
+        if not self.provider:
+            raise RuntimeError("未配置 OPENAI_API_KEY 或 ARK_API_KEY，无法生成分镜关键帧。")
+        final_prompt = str(prompt or shot.get("keyframe_prompt") or shot.get("visual_goal") or shot.get("narration") or "").strip()
+        if not final_prompt:
+            raise RuntimeError("当前镜头缺少 keyframe_prompt，无法生成关键帧。")
+        references = [str(item).strip() for item in reference_images or [] if str(item).strip()]
+        if references and "上一镜头关键帧参考图" not in final_prompt:
+            final_prompt = (
+                f"{final_prompt}\n\n"
+                "上一镜头关键帧参考图：已随请求提供。请参考上一帧的色彩、笔触、主体外观、空间轴线和叙事情绪；"
+                "当前画面仍以本镜头内容为准，不要机械复制上一帧构图。"
+            )
+        final_negative_prompt = (
+            str(negative_prompt).strip()
+            if negative_prompt is not None
+            else str(shot.get("negative_prompt") or "").strip()
+        )
+        generated = generate_image_with_optional_references(
+            self.provider,
+            prompt=final_prompt,
+            negative_prompt=final_negative_prompt,
+            reference_images=references,
+        )
+        image_bytes = generated.get("image_bytes")
+        if not isinstance(image_bytes, (bytes, bytearray)) or not image_bytes:
+            raise RuntimeError("图片接口没有返回可保存的图片内容。")
+
+        mime_type = str(generated.get("mime_type") or "image/png")
+        extension = image_extension(mime_type)
+        storyboard_id = safe_asset_name(str(shot.get("storyboard_id") or "storyboard"))
+        shot_id = safe_asset_name(str(shot.get("shot_id") or "shot"))
+        asset_dir = Path(output_dir) / storyboard_id / shot_id
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        asset_path = asset_dir / f"keyframe.{extension}"
+        asset_path.write_bytes(bytes(image_bytes))
+        return {
+            "asset_path": asset_path,
+            "mime_type": mime_type,
+            "model": str(generated.get("model") or ""),
+            "provider": str(generated.get("provider") or "ark"),
+            "prompt": final_prompt,
+            "negative_prompt": final_negative_prompt,
+            "workflow_name": str(generated.get("workflow_name") or workflow_name_for_provider(generated, asset_type="keyframe")),
+        }
+
 
 class ChainedImageProvider:
     def __init__(self, providers: list[Any]):
         self.providers = providers
 
-    def generate_image(self, *, prompt: str, negative_prompt: str) -> dict[str, Any]:
+    def generate_image(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: str,
+        reference_images: list[str] | None = None,
+    ) -> dict[str, Any]:
         errors = []
         for provider in self.providers:
             try:
-                return provider.generate_image(prompt=prompt, negative_prompt=negative_prompt)
+                return generate_image_with_optional_references(
+                    provider,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    reference_images=reference_images or [],
+                )
             except RuntimeError as exc:
                 errors.append(str(exc))
         raise RuntimeError("所有图片生成通道均失败：" + " | ".join(errors))
@@ -160,7 +225,13 @@ class OpenAIImageProvider:
         self.size = size or os.environ.get("OPENAI_IMAGE_SIZE", "1024x1024")
         self.quality = quality or os.environ.get("OPENAI_IMAGE_QUALITY", "medium")
 
-    def generate_image(self, *, prompt: str, negative_prompt: str) -> dict[str, Any]:
+    def generate_image(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: str,
+        reference_images: list[str] | None = None,
+    ) -> dict[str, Any]:
         full_prompt = prompt
         if negative_prompt:
             full_prompt = f"{prompt}\n\n避免：{negative_prompt}"
@@ -239,10 +310,28 @@ class ArkSeedDreamImageProvider:
         else:
             self.watermark = bool(watermark)
 
-    def generate_image(self, *, prompt: str, negative_prompt: str) -> dict[str, Any]:
+    def generate_image(
+        self,
+        *,
+        prompt: str,
+        negative_prompt: str,
+        reference_images: list[str] | None = None,
+    ) -> dict[str, Any]:
         errors = []
+        references = [str(item).strip() for item in reference_images or [] if str(item).strip()]
         for model in self.models:
             try:
+                if references:
+                    try:
+                        return self._generate_image_once(
+                            model=model,
+                            prompt=prompt,
+                            negative_prompt=negative_prompt,
+                            reference_images=references,
+                        )
+                    except TypeError as exc:
+                        if "reference_images" not in str(exc):
+                            raise
                 return self._generate_image_once(model=model, prompt=prompt, negative_prompt=negative_prompt)
             except RuntimeError as exc:
                 message = str(exc)
@@ -251,7 +340,14 @@ class ArkSeedDreamImageProvider:
                     break
         raise RuntimeError("ARK SeedDream 候选模型均未生成成功：" + " | ".join(errors))
 
-    def _generate_image_once(self, *, model: str, prompt: str, negative_prompt: str) -> dict[str, Any]:
+    def _generate_image_once(
+        self,
+        *,
+        model: str,
+        prompt: str,
+        negative_prompt: str,
+        reference_images: list[str] | None = None,
+    ) -> dict[str, Any]:
         full_prompt = prompt
         if negative_prompt:
             full_prompt = f"{prompt}\n\n避免：{negative_prompt}"
@@ -262,6 +358,9 @@ class ArkSeedDreamImageProvider:
             "response_format": self.response_format,
             "watermark": self.watermark,
         }
+        references = [str(item).strip() for item in reference_images or [] if str(item).strip()]
+        if references:
+            body["image"] = references
         request = urllib.request.Request(
             self.base_url,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -288,6 +387,28 @@ class ArkSeedDreamImageProvider:
             "provider": "ark",
             "workflow_name": "ark_seeddream_subject_anchor_v1",
         }
+
+
+def generate_image_with_optional_references(
+    provider: Any,
+    *,
+    prompt: str,
+    negative_prompt: str,
+    reference_images: list[str] | None = None,
+) -> dict[str, Any]:
+    references = [str(item).strip() for item in reference_images or [] if str(item).strip()]
+    if not references:
+        return provider.generate_image(prompt=prompt, negative_prompt=negative_prompt)
+    try:
+        return provider.generate_image(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            reference_images=references,
+        )
+    except TypeError as exc:
+        if "reference_images" not in str(exc):
+            raise
+        return provider.generate_image(prompt=prompt, negative_prompt=negative_prompt)
 
 
 def build_subject_anchor_prompt(subject: dict[str, Any]) -> str:

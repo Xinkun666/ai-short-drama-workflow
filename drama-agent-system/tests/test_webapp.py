@@ -6,6 +6,7 @@ import sqlite3
 from pypdf import PdfWriter
 
 from drama_agents.storage import MaterialDatabase
+from drama_agents.storyboard_agent import RuleBasedStoryboardProvider
 from drama_agents.vector_store import LocalVectorStore
 from drama_agents.visual_scene_agent import (
     RuleBasedVisualSceneProvider,
@@ -83,6 +84,7 @@ class FakeTimelineProvider:
 class FakeScriptProvider:
     def __init__(self):
         self.edit_payload = None
+        self.adapt_payload = None
 
     def generate_script(self, payload):
         return {
@@ -180,6 +182,27 @@ class FakeScriptProvider:
     def revise_script(self, source_payload, draft, review):
         return self.generate_script(source_payload)
 
+    def adapt_script_for_storyboard(self, payload):
+        self.adapt_payload = payload
+        return {
+            "title": "智人为什么从非洲走向世界 - 分镜剧本",
+            "adapted_article": "分镜剧本旁白第一段。\n\n分镜剧本旁白第二段。",
+            "adapted_segments": [
+                {
+                    "segment_id": "seg-001",
+                    "voiceover": "分镜剧本旁白第一段。",
+                    "dramatic_function": "开场钩子",
+                    "visual_goal": "建立弱小智人的开场处境。",
+                    "visual_progression": "从抽象主题进入东非草原具体画面。",
+                    "scene_intent": "群像",
+                    "continuity_hint": "用草原地平线承接下一段。",
+                    "fact_boundary": "保留史实边界。",
+                }
+            ],
+            "adaptation_notes": ["把文章式讲述改成可分镜段落。"],
+            "review_notes": [],
+        }
+
     def edit_selection(self, payload):
         self.edit_payload = payload
         intent = payload.get("intent")
@@ -237,6 +260,15 @@ class PlanningScriptProvider(FakeScriptProvider):
     def plan_assistant_action(self, payload):
         self.plan_payload = payload
         return self.plan
+
+
+class CapturingStoryboardProvider(RuleBasedStoryboardProvider):
+    def __init__(self):
+        self.payload = None
+
+    def generate_storyboard(self, payload):
+        self.payload = payload
+        return super().generate_storyboard(payload)
 
 
 def test_homepage_renders_material_prep_workspace(tmp_path):
@@ -534,6 +566,7 @@ def test_parse_api_creates_record_with_book_metrics(tmp_path):
     assert record["total_words"] >= 0
     assert record["detail_url"] == "/materials/demo"
     assert record["parsed_at"]
+    assert re.fullmatch(r"\d{8} \d{4}", record["parsed_at"])
 
     records_response = client.get("/api/records")
     records_payload = records_response.get_json()
@@ -861,10 +894,20 @@ def test_script_generation_dedicated_view_pages_render_saved_sections(tmp_path):
 
     assert script_response.status_code == 200
     script_html = script_response.get_data(as_text=True)
+    tabs_html = script_html[
+        script_html.index('<nav class="script-page-tabs"') : script_html.index("</nav>", script_html.index('<nav class="script-page-tabs"'))
+    ]
     assert "剧本阅读器" in script_html
     assert 'data-script-reader="' in script_html
+    assert "剧本改造" in tabs_html
+    assert "分镜剧本" in tabs_html
+    assert 'data-storyboard-script-link aria-disabled="true"' in tabs_html
+    assert "data-script-adapt" in tabs_html
+    assert "script-storyboard-panel" in script_html
     assert "编辑" in script_html
     assert "保存" in script_html
+    assert ">主体</a>" not in tabs_html
+    assert ">地点</a>" not in tabs_html
     assert "剧本对话助手" not in script_html
     assert "RAG 助手" not in script_html
     assert "构建向量库" not in script_html
@@ -886,15 +929,70 @@ def test_script_generation_dedicated_view_pages_render_saved_sections(tmp_path):
     assert 'href="#script-paragraph-1"' in script_html
     assert "返回正文" in script_html
 
-    assert subjects_response.status_code == 200
-    subjects_html = subjects_response.get_data(as_text=True)
-    assert "主体查看" in subjects_html
-    assert "主体尚未生成，可在需要时单独生成" in subjects_html
+    assert subjects_response.status_code == 404
+    assert maps_response.status_code == 404
 
-    assert maps_response.status_code == 200
-    maps_html = maps_response.get_data(as_text=True)
-    assert "地点画面" in maps_html
-    assert "地点画面尚未生成，可在需要时单独生成" in maps_html
+
+def test_script_adaptation_generates_storyboard_script_and_updates_reader(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    provider = FakeScriptProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    response = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard-script/adapt")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["storyboard_script"]["adapted_article"].startswith("分镜剧本旁白第一段")
+    assert payload["storyboard_script"]["adapted_segments"][0]["visual_progression"]
+    assert provider.adapt_payload["script"]["article"]
+    updated = MaterialDatabase(tmp_path / "outputs" / "material_workstation.sqlite3").find_script_generation(
+        generation["generation_id"]
+    )
+    assert updated["script"]["storyboard_script"]["adapted_article"].startswith("分镜剧本旁白第一段")
+
+    html = client.get(f"/script-generations/{generation['generation_id']}/script").get_data(as_text=True)
+    tabs_html = html[html.index('<nav class="script-page-tabs"') : html.index("</nav>", html.index('<nav class="script-page-tabs"'))]
+    assert "再次改造" in html
+    assert "再次改造" in tabs_html
+    assert 'data-storyboard-script-link aria-disabled="false"' in tabs_html
+    assert "分镜剧本旁白第一段" in html
+    assert "开场钩子" in html
+
+
+def test_storyboard_generation_uses_adapted_storyboard_script(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    script_provider = FakeScriptProvider()
+    storyboard_provider = CapturingStoryboardProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=script_provider,
+        storyboard_provider=storyboard_provider,
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    client.post(f"/api/script/generations/{generation['generation_id']}/storyboard-script/adapt")
+
+    response = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard/generate")
+
+    assert response.status_code == 200
+    assert storyboard_provider.payload["full_script"].startswith("分镜剧本旁白第一段")
+    assert storyboard_provider.payload["adapted_segments"][0]["segment_id"] == "seg-001"
+    assert response.get_json()["storyboard"]["source_type"] == "storyboard_script"
 
 
 def app_with_generated_script(tmp_path):
@@ -3242,9 +3340,12 @@ def test_script_reader_uses_chinese_article_typography():
     assert "[hidden]" in styles
     assert "display: none !important;" in styles
     assert "width: min(100vw - 64px, 1420px);" in page_shell_rule
-    assert "grid-template-columns: minmax(0, 1fr);" in workspace_rule
+    assert "grid-template-columns: minmax(0, 1fr) minmax(360px, 0.86fr);" in workspace_rule
     assert "height: auto;" in workspace_rule
     assert "overflow: visible;" in workspace_rule
+    assert ".script-storyboard-panel" in styles
+    assert "data-script-adapt" in template
+    assert "data-storyboard-script-link" in template
     assert "max-width: 100%;" in article_card_rule
     assert "max-width: 100%;" in toolbar_rule
     assert "height: auto;" in main_rule
@@ -3273,8 +3374,8 @@ def test_script_reader_uses_chinese_article_typography():
     assert "data-rag-" not in template
     assert "data-conversation-" not in template
     assert "data-selection-" not in template
-    assert "styles.css') }}?v=20260627c" in template
-    assert "script_reader.js') }}?v=20260627c" in template
+    assert "styles.css') }}?v=20260630a" in template
+    assert "script_reader.js') }}?v=20260630a" in template
     assert ".script-conversation-bar" in styles
     assert ".script-conversation-sidebar" in styles
     assert ".script-conversation-list" in styles

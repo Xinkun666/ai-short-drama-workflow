@@ -4,9 +4,19 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ storyboard.title }} · 分镜详情</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260628b">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=20260630a">
   </head>
   <body>
+    {% set coverage = storyboard.coverage or {} %}
+    {% set scene_blocks = storyboard.scene_blocks or [] %}
+    {% set uncovered_paragraphs = coverage.get("uncovered_paragraphs") or [] %}
+    {% set covered_paragraph_count = coverage.get("covered_paragraph_count", 0) or 0 %}
+    {% set metrics = namespace(supplemental=0, missing_assets=0, review=0) %}
+    {% for shot in shots %}
+      {% if shot.is_supplemental %}{% set metrics.supplemental = metrics.supplemental + 1 %}{% endif %}
+      {% if shot.asset_status != "ready" %}{% set metrics.missing_assets = metrics.missing_assets + 1 %}{% endif %}
+      {% if shot.needs_manual_review %}{% set metrics.review = metrics.review + 1 %}{% endif %}
+    {% endfor %}
     <main class="storyboard-detail-shell">
       <header class="storyboard-detail-hero">
         <div>
@@ -23,8 +33,70 @@
           <a class="record-action" href="/#scene">返回</a>
           <button class="record-action delete" id="deleteStoryboardButton" type="button">删除</button>
           <button class="record-action" id="regenerateStoryboardButton" type="button">重新生成</button>
+          <button class="record-action" id="batchKeyframeButton" type="button">批量生成关键帧</button>
         </div>
       </header>
+
+      <section class="storyboard-keyframe-progress" id="storyboardKeyframeBatchPanel" hidden>
+        <div class="storyboard-keyframe-progress-head">
+          <div>
+            <strong>关键帧生成进度</strong>
+            <span id="storyboardKeyframeProgressText">等待开始</span>
+          </div>
+          <span id="storyboardKeyframeProgressCount">0 / 0</span>
+        </div>
+        <div class="storyboard-keyframe-progress-track">
+          <div id="storyboardKeyframeProgressFill"></div>
+        </div>
+        <div class="storyboard-keyframe-progress-list" id="storyboardKeyframeProgressList"></div>
+      </section>
+
+      <section class="storyboard-metric-strip" id="storyboardCoverageSummary">
+        <article>
+          <span>剧本覆盖率</span>
+          <strong>{{ "%.0f"|format((coverage.get("coverage_ratio", 0) or 0) * 100) }}%</strong>
+          <small>{{ covered_paragraph_count }} 已覆盖 / {{ uncovered_paragraphs|length }} 未覆盖</small>
+        </article>
+        <article>
+          <span>补充镜头</span>
+          <strong>{{ metrics.supplemental }}</strong>
+          <small>解释、地图、转场、图解</small>
+        </article>
+        <article>
+          <span>资产待补</span>
+          <strong>{{ metrics.missing_assets }}</strong>
+          <small>主体/场景锚点缺口</small>
+        </article>
+        <article>
+          <span>人工检查</span>
+          <strong>{{ metrics.review }}</strong>
+          <small>{{ storyboard.status }}</small>
+        </article>
+      </section>
+
+      {% if scene_blocks %}
+      <section class="storyboard-scene-block-strip">
+        <div class="storyboard-scene-block-strip-head">
+          <div>
+            <span>主场景结构</span>
+            <strong>{{ scene_blocks|length }} 个主场景</strong>
+          </div>
+          <em>每个主场景下再展开关键帧、旁白和字幕</em>
+        </div>
+        <div class="storyboard-scene-block-grid">
+          {% for block in scene_blocks %}
+          <article>
+            <div>
+              <strong>{{ "%02d"|format(block.scene_block_index or loop.index) }} · {{ block.title }}</strong>
+              <span>{{ block.shot_count or 0 }} 镜头 · {{ "%.0f"|format(block.estimated_duration_sec or 0) }} 秒</span>
+            </div>
+            <p>{{ block.summary }}</p>
+            <small>{{ block.location }} · {{ block.time_context }}</small>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
 
       <section class="storyboard-detail-grid">
         <aside class="storyboard-shot-sidebar">
@@ -44,6 +116,19 @@
               <small id="storyboardShotEditorStatus">选择镜头后编辑</small>
             </div>
           </div>
+          <section class="storyboard-reference-box storyboard-board-insights">
+            <strong>覆盖与剧本反馈</strong>
+            <div id="storyboardCoverageDetails"></div>
+            <div id="storyboardScriptFeedback"></div>
+          </section>
+          <section class="storyboard-reference-box storyboard-preparation-box">
+            <div class="storyboard-preparation-head">
+              <strong>候选确认</strong>
+              <span id="storyboardPreparationStatus">读取当前镜头状态</span>
+            </div>
+            <div class="storyboard-readiness-strip" id="storyboardPreparationSummary"></div>
+            <div class="storyboard-candidate-list" id="storyboardShotCandidates"></div>
+          </section>
           <form id="storyboardShotForm" class="storyboard-shot-form">
             <label>
               <span>旁白 narration</span>
@@ -78,6 +163,72 @@
               <span>视觉目标 visual_goal</span>
               <textarea name="visual_goal" rows="3"></textarea>
             </label>
+            <section class="storyboard-reference-box storyboard-source-box">
+              <strong>来源覆盖 source</strong>
+              <div class="storyboard-form-row">
+                <label>
+                  <span>source_paragraph_index</span>
+                  <input name="source_paragraph_index" type="number" min="0" step="1">
+                </label>
+                <label>
+                  <span>source_text_start</span>
+                  <input name="source_text_start" type="number" min="0" step="1">
+                </label>
+              </div>
+              <label>
+                <span>source_text_end</span>
+                <input name="source_text_end" type="number" min="0" step="1">
+              </label>
+              <label>
+                <span>source_excerpt</span>
+                <textarea name="source_excerpt" rows="3"></textarea>
+              </label>
+              <label class="storyboard-check-row">
+                <input name="is_supplemental" type="checkbox">
+                <span>补充镜头 is_supplemental</span>
+              </label>
+              <label>
+                <span>supplemental_reason</span>
+                <textarea name="supplemental_reason" rows="2"></textarea>
+              </label>
+            </section>
+            <section class="storyboard-reference-box">
+              <strong>序列与节拍</strong>
+              <div class="storyboard-form-row">
+                <label>
+                  <span>sequence_id</span>
+                  <input name="sequence_id" type="text">
+                </label>
+                <label>
+                  <span>sequence_title</span>
+                  <input name="sequence_title" type="text">
+                </label>
+              </div>
+              <div class="storyboard-form-row">
+                <label>
+                  <span>beat_id</span>
+                  <input name="beat_id" type="text">
+                </label>
+                <label>
+                  <span>beat_title</span>
+                  <input name="beat_title" type="text">
+                </label>
+              </div>
+              <div class="storyboard-form-row">
+                <label>
+                  <span>prev_shot_id</span>
+                  <input name="prev_shot_id" type="text">
+                </label>
+                <label>
+                  <span>next_shot_id</span>
+                  <input name="next_shot_id" type="text">
+                </label>
+              </div>
+              <label>
+                <span>transition</span>
+                <input name="transition" type="text">
+              </label>
+            </section>
             <div class="storyboard-form-row">
               <label>
                 <span>绑定场景 scene_id</span>
@@ -106,6 +257,18 @@
               <textarea name="camera" rows="3"></textarea>
             </label>
             <label>
+              <span>continuity</span>
+              <textarea name="continuity" rows="5"></textarea>
+            </label>
+            <label>
+              <span>production_plan</span>
+              <textarea name="production_plan" rows="5"></textarea>
+            </label>
+            <label>
+              <span>prompt_parts</span>
+              <textarea name="prompt_parts" rows="7"></textarea>
+            </label>
+            <label>
               <span>keyframe_prompt</span>
               <textarea name="keyframe_prompt" rows="7"></textarea>
             </label>
@@ -128,7 +291,6 @@
             <div class="storyboard-editor-actions">
               <button class="visual-button primary" type="submit">保存修改</button>
               <button class="visual-button secondary" id="singleKeyframeButton" type="button">生成本镜头关键帧</button>
-              <button class="visual-button secondary" id="batchKeyframeButton" type="button">批量生成关键帧</button>
             </div>
           </form>
         </section>
@@ -140,13 +302,24 @@
       let shots = {{ shots|tojson }};
       const subjects = {{ subjects|tojson }};
       const scenes = {{ scenes|tojson }};
+      const sceneBlocks = storyboard.scene_blocks || [];
       const arkReady = {{ "true" if ark_ready else "false" }};
       const shotApiBase = `/api/storyboards/{{ storyboard.storyboard_id }}/shots/`;
       const shotList = document.querySelector("#storyboardShotList");
       const form = document.querySelector("#storyboardShotForm");
       const editorStatus = document.querySelector("#storyboardShotEditorStatus");
       const referenceAssets = document.querySelector("#storyboardReferenceAssets");
+      const preparationStatus = document.querySelector("#storyboardPreparationStatus");
+      const preparationSummary = document.querySelector("#storyboardPreparationSummary");
+      const candidateList = document.querySelector("#storyboardShotCandidates");
+      const batchKeyframeButton = document.querySelector("#batchKeyframeButton");
+      const keyframeBatchPanel = document.querySelector("#storyboardKeyframeBatchPanel");
+      const keyframeProgressText = document.querySelector("#storyboardKeyframeProgressText");
+      const keyframeProgressCount = document.querySelector("#storyboardKeyframeProgressCount");
+      const keyframeProgressFill = document.querySelector("#storyboardKeyframeProgressFill");
+      const keyframeProgressList = document.querySelector("#storyboardKeyframeProgressList");
       let activeShotId = shots[0] ? shots[0].shot_id : "";
+      const preparationStateByShot = {};
 
       function escapeHtml(value) {
         return String(value || "")
@@ -173,14 +346,139 @@
         return labels[type] || type || "镜头";
       }
 
-      function renderShotList() {
-        shotList.innerHTML = shots.map((shot) => `
+      function candidateTypeLabel(type) {
+        const labels = {
+          scene: "场景",
+          subject: "主体",
+          visual_element: "元素",
+        };
+        return labels[type] || type || "候选";
+      }
+
+      function candidateStatusLabel(status) {
+        const labels = {
+          pending: "待确认",
+          linked: "已确认",
+          ignored: "已忽略",
+        };
+        return labels[status] || status || "待确认";
+      }
+
+      function jsonPreview(value) {
+        try {
+          return JSON.stringify(value || {}, null, 2);
+        } catch (error) {
+          return "{}";
+        }
+      }
+
+      function renderBoardInsights() {
+        const coverage = storyboard.coverage || {};
+        const ratio = Math.round(Number(coverage.coverage_ratio || 0) * 100);
+        const coveredCount = Number(coverage.covered_paragraph_count || 0);
+        const paragraphCount = Number(coverage.paragraph_count || 0);
+        const uncovered = coverage.uncovered_paragraphs || [];
+        document.querySelector("#storyboardCoverageDetails").innerHTML = `
+          <div class="storyboard-insight-row">
+            <span>coverage_ratio</span>
+            <strong>${Number.isFinite(ratio) ? ratio : 0}%</strong>
+          </div>
+          <p>covered_paragraph_count: ${Number.isFinite(coveredCount) ? coveredCount : 0} / ${Number.isFinite(paragraphCount) ? paragraphCount : 0}</p>
+          <p>uncovered_paragraphs: ${escapeHtml(uncovered.join(", ") || "无")}</p>
+        `;
+        const feedback = storyboard.script_feedback || [];
+        document.querySelector("#storyboardScriptFeedback").innerHTML = feedback.length
+          ? feedback.map((item) => `<p>${escapeHtml(typeof item === "string" ? item : JSON.stringify(item))}</p>`).join("")
+          : '<p>暂无 script_feedback。</p>';
+      }
+
+      function sceneBlockById(sceneBlockId) {
+        return sceneBlocks.find((block) => block.scene_block_id === sceneBlockId);
+      }
+
+      function groupedShots() {
+        const groups = [];
+        shots.forEach((shot) => {
+          const block = sceneBlockById(shot.scene_block_id) || sceneBlockById(shot.sequence_id) || null;
+          const sequenceKey = (block && block.scene_block_id) || shot.sequence_id || `sequence-${shot.shot_index || groups.length + 1}`;
+          let sequence = groups.find((item) => item.key === sequenceKey);
+          if (!sequence) {
+            sequence = {
+              key: sequenceKey,
+              title: (block && block.title) || shot.scene_block_title || shot.sequence_title || "未命名主场景",
+              block,
+              beats: [],
+            };
+            groups.push(sequence);
+          }
+          const beatKey = shot.beat_id || `${sequenceKey}-beat-${shot.shot_index || sequence.beats.length + 1}`;
+          let beat = sequence.beats.find((item) => item.key === beatKey);
+          if (!beat) {
+            beat = {
+              key: beatKey,
+              title: shot.beat_title || "未命名节拍",
+              shots: [],
+            };
+            sequence.beats.push(beat);
+          }
+          beat.shots.push(shot);
+        });
+        return groups;
+      }
+
+      function sequenceMeta(sequence) {
+        const block = sequence.block || {};
+        const shotCount = sequence.beats.reduce((total, beat) => total + beat.shots.length, 0);
+        const duration = block.estimated_duration_sec || sequence.beats.reduce((total, beat) => {
+          return total + beat.shots.reduce((sum, shot) => sum + Number(shot.duration_sec || 0), 0);
+        }, 0);
+        return {
+          shotCount,
+          duration,
+          summary: block.summary || "",
+          location: block.location || "",
+          timeContext: block.time_context || "",
+        };
+      }
+
+      function renderShotCard(shot) {
+        const plan = shot.production_plan || {};
+        const chips = [
+          `${escapeHtml(String(shot.duration_sec || 0))} 秒`,
+          escapeHtml(plan.render_method || "未定制法"),
+          escapeHtml(plan.cost_tier || "cost?"),
+          shot.is_supplemental ? "补充镜头" : "",
+          shot.needs_manual_review ? "需检查" : "",
+        ].filter(Boolean);
+        return `
           <button class="storyboard-shot-card ${shot.shot_id === activeShotId ? "active" : ""}" type="button" data-shot-id="${escapeHtml(shot.shot_id)}">
             <strong>#${String(shot.shot_index).padStart(2, "0")} · ${escapeHtml(shotTypeLabel(shot.shot_type))}</strong>
-            <span>${escapeHtml((shot.narration || "").slice(0, 58))}</span>
+            <span>${escapeHtml((shot.narration || shot.source_excerpt || "").slice(0, 72))}</span>
             <em>${escapeHtml(shot.scene_name || "未绑定场景")} · ${escapeHtml((shot.subject_names || []).join("、") || "未绑定主体")}</em>
-            <small>${escapeHtml(String(shot.duration_sec || 0))} 秒 · ${escapeHtml(shot.asset_status || "")}</small>
+            <div class="storyboard-shot-chip-row">${chips.map((chip) => `<small>${chip}</small>`).join("")}</div>
+            ${shot.supplemental_reason ? `<em>${escapeHtml(shot.supplemental_reason)}</em>` : ""}
           </button>
+        `;
+      }
+
+      function renderShotList() {
+        shotList.innerHTML = groupedShots().map((sequence) => `
+          <section class="storyboard-sequence-group">
+            <div class="storyboard-main-scene-head">
+              <div>
+                <h3>${escapeHtml(sequence.title)}</h3>
+                <span>${escapeHtml(String(sequenceMeta(sequence).shotCount))} 镜头 · ${Math.round(Number(sequenceMeta(sequence).duration || 0))} 秒</span>
+              </div>
+              ${sequenceMeta(sequence).summary ? `<p>${escapeHtml(sequenceMeta(sequence).summary)}</p>` : ""}
+              ${sequenceMeta(sequence).location ? `<em>${escapeHtml(sequenceMeta(sequence).location)} · ${escapeHtml(sequenceMeta(sequence).timeContext || "")}</em>` : ""}
+            </div>
+            ${sequence.beats.map((beat) => `
+              <div class="storyboard-beat-group">
+                <h4>${escapeHtml(beat.title)}</h4>
+                ${beat.shots.map(renderShotCard).join("")}
+              </div>
+            `).join("")}
+          </section>
         `).join("") || '<div class="visual-empty-state compact"><strong>暂无镜头</strong></div>';
         shotList.querySelectorAll("[data-shot-id]").forEach((button) => {
           button.addEventListener("click", () => {
@@ -200,16 +498,129 @@
         form.shot_type.value = shot.shot_type || "narrative_shot";
         form.duration_sec.value = shot.duration_sec || 4;
         form.visual_goal.value = shot.visual_goal || "";
+        form.source_paragraph_index.value = shot.source_paragraph_index || 0;
+        form.source_text_start.value = shot.source_text_start || 0;
+        form.source_text_end.value = shot.source_text_end || 0;
+        form.source_excerpt.value = shot.source_excerpt || "";
+        form.is_supplemental.checked = Boolean(shot.is_supplemental);
+        form.supplemental_reason.value = shot.supplemental_reason || "";
+        form.sequence_id.value = shot.sequence_id || "";
+        form.sequence_title.value = shot.sequence_title || "";
+        form.beat_id.value = shot.beat_id || "";
+        form.beat_title.value = shot.beat_title || "";
+        form.prev_shot_id.value = shot.prev_shot_id || "";
+        form.next_shot_id.value = shot.next_shot_id || "";
+        form.transition.value = shot.transition || "cut";
         form.scene_id.value = shot.scene_id || "";
         form.subject_ids.value = (shot.subject_ids || []).join(", ");
         form.visual_elements.value = (shot.visual_elements || []).join(", ");
-        form.camera.value = JSON.stringify(shot.camera || {}, null, 2);
+        form.camera.value = jsonPreview(shot.camera);
+        form.continuity.value = jsonPreview(shot.continuity);
+        form.production_plan.value = jsonPreview(shot.production_plan);
+        form.prompt_parts.value = jsonPreview(shot.prompt_parts);
         form.keyframe_prompt.value = shot.keyframe_prompt || "";
         form.video_prompt.value = shot.video_prompt || "";
         form.negative_prompt.value = shot.negative_prompt || "";
         form.fact_safety_note.value = shot.fact_safety_note || "";
         form.needs_manual_review.checked = Boolean(shot.needs_manual_review);
         referenceAssets.innerHTML = renderReferenceAssets(shot.reference_assets || {});
+        loadPreparationState(shot.shot_id);
+      }
+
+      async function loadPreparationState(shotId) {
+        preparationStatus.textContent = "正在读取";
+        candidateList.innerHTML = '<div class="visual-empty-state compact"><strong>读取候选中</strong></div>';
+        try {
+          const response = await fetch(`${shotApiBase}${encodeURIComponent(shotId)}/preparation-state`);
+          const payload = await response.json();
+          if (!response.ok) {
+            throw new Error(payload.error || "读取失败");
+          }
+          if (activeShotId !== shotId) return;
+          preparationStateByShot[shotId] = payload.state;
+          renderPreparationState(payload.state);
+        } catch (error) {
+          if (activeShotId !== shotId) return;
+          preparationStatus.textContent = error.message || "读取失败";
+          preparationSummary.innerHTML = "";
+          candidateList.innerHTML = '<div class="visual-empty-state compact"><strong>候选读取失败</strong></div>';
+        }
+      }
+
+      function renderPreparationState(state) {
+        const ready = Boolean(state.ready_for_keyframe);
+        preparationStatus.textContent = ready ? "关键帧准备完成" : `${state.pending_candidate_count || 0} 个候选待确认`;
+        preparationSummary.innerHTML = `
+          <span data-ready="${state.basic_info_ready ? "true" : "false"}">基础信息</span>
+          <span data-ready="${state.prompt_ready ? "true" : "false"}">关键帧 prompt</span>
+          <span data-ready="${state.pending_candidate_count ? "false" : "true"}">候选 ${escapeHtml(String(state.pending_candidate_count || 0))}</span>
+          <span data-ready="${ready ? "true" : "false"}">${ready ? "ready" : "pending"}</span>
+        `;
+        candidateList.innerHTML = (state.candidates || []).map(renderCandidate).join("")
+          || '<div class="visual-empty-state compact"><strong>暂无候选</strong></div>';
+        candidateList.querySelectorAll("[data-candidate-action]").forEach((button) => {
+          button.addEventListener("click", () => applyCandidateAction(button.dataset.candidateAction, button.dataset.candidateId));
+        });
+      }
+
+      function renderCandidate(candidate) {
+        const pending = candidate.candidate_status === "pending";
+        const payload = candidate.payload || {};
+        const source = payload.source_excerpt ? `<p>${escapeHtml(String(payload.source_excerpt).slice(0, 96))}</p>` : "";
+        return `
+          <article class="storyboard-candidate-card" data-status="${escapeHtml(candidate.candidate_status)}">
+            <div>
+              <strong>${escapeHtml(candidateTypeLabel(candidate.candidate_type))} · ${escapeHtml(candidate.candidate_name)}</strong>
+              <span>${escapeHtml(candidateStatusLabel(candidate.candidate_status))}${candidate.linked_entity_id ? ` · ${escapeHtml(candidate.linked_entity_id)}` : ""}</span>
+            </div>
+            ${source}
+            <div class="storyboard-candidate-actions">
+              <button class="visual-button small" type="button" data-candidate-action="link" data-candidate-id="${escapeHtml(candidate.candidate_id)}" ${pending ? "" : "disabled"}>确认绑定</button>
+              <button class="visual-button small" type="button" data-candidate-action="ignore" data-candidate-id="${escapeHtml(candidate.candidate_id)}" ${pending ? "" : "disabled"}>忽略</button>
+            </div>
+          </article>
+        `;
+      }
+
+      function linkedEntityForCandidate(candidate) {
+        const payload = candidate.payload || {};
+        if (candidate.candidate_type === "scene") {
+          return form.scene_id.value || payload.scene_id || candidate.linked_entity_id || "";
+        }
+        if (candidate.candidate_type === "subject") {
+          return payload.subject_id || candidate.linked_entity_id || "";
+        }
+        return candidate.linked_entity_id || "";
+      }
+
+      async function applyCandidateAction(action, candidateId) {
+        const state = preparationStateByShot[activeShotId];
+        const candidate = state ? (state.candidates || []).find((item) => String(item.candidate_id) === String(candidateId)) : null;
+        if (!candidate) return;
+        const body = action === "link" ? { linked_entity_id: linkedEntityForCandidate(candidate) } : {};
+        const response = await fetch(
+          `${shotApiBase}${encodeURIComponent(activeShotId)}/candidates/${encodeURIComponent(candidateId)}/${action}`,
+          {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          }
+        );
+        const payload = await response.json();
+        if (!response.ok) {
+          editorStatus.textContent = payload.error || "候选更新失败";
+          return;
+        }
+        preparationStateByShot[activeShotId] = payload.state;
+        if (payload.state && payload.state.shot) {
+          shots = shots.map((item) => (item.shot_id === payload.state.shot.shot_id ? payload.state.shot : item));
+          form.scene_id.value = payload.state.shot.scene_id || "";
+          form.subject_ids.value = (payload.state.shot.subject_ids || []).join(", ");
+          referenceAssets.innerHTML = renderReferenceAssets(payload.state.shot.reference_assets || {});
+          renderShotList();
+        }
+        renderPreparationState(payload.state);
+        editorStatus.textContent = action === "link" ? "候选已确认" : "候选已忽略";
       }
 
       function renderReferenceAssets(assets) {
@@ -229,21 +640,117 @@
         `;
       }
 
+      function keyframeQueue() {
+        return shots.filter((shot) => {
+          const plan = shot.production_plan || {};
+          return shot.keyframe_prompt && plan.needs_keyframe !== false;
+        });
+      }
+
+      function renderKeyframeProgress(records) {
+        const done = records.filter((item) => item.status === "done").length;
+        const failed = records.filter((item) => item.status === "failed").length;
+        const running = records.some((item) => item.status === "running");
+        const total = records.length;
+        const finished = done + failed;
+        keyframeProgressCount.textContent = `${finished} / ${total}`;
+        keyframeProgressText.textContent = running
+          ? `正在生成，第 ${Math.min(finished + 1, total)} 个`
+          : failed
+          ? `完成 ${done} 个，失败 ${failed} 个`
+          : finished === total && total
+          ? `已完成 ${done} 个`
+          : "等待开始";
+        keyframeProgressFill.style.width = total ? `${Math.round((finished / total) * 100)}%` : "0%";
+        keyframeProgressList.innerHTML = records.map((item) => `
+          <article class="storyboard-keyframe-progress-row" data-status="${escapeHtml(item.status)}">
+            <div>
+              <strong>#${String(item.shot.shot_index).padStart(2, "0")} · ${escapeHtml(shotTypeLabel(item.shot.shot_type))}</strong>
+              <span>${escapeHtml((item.shot.narration || item.shot.source_excerpt || "").slice(0, 72))}</span>
+            </div>
+            <em>${escapeHtml(item.label)}</em>
+            ${item.asset_url ? `<a href="${escapeHtml(item.asset_url)}" target="_blank" rel="noreferrer">查看</a>` : ""}
+          </article>
+        `).join("");
+      }
+
+      async function runBatchKeyframes() {
+        const queue = keyframeQueue();
+        keyframeBatchPanel.hidden = false;
+        if (!arkReady) {
+          const records = queue.map((shot) => ({ shot, status: "failed", label: "未配置 ARK_API_KEY", asset_url: "" }));
+          renderKeyframeProgress(records);
+          editorStatus.textContent = "未配置 ARK_API_KEY，无法调用 Seedream 生成关键帧。";
+          return;
+        }
+        if (!queue.length) {
+          renderKeyframeProgress([]);
+          keyframeProgressText.textContent = "没有可生成的镜头";
+          editorStatus.textContent = "没有找到可生成关键帧的镜头。";
+          return;
+        }
+        batchKeyframeButton.disabled = true;
+        const records = queue.map((shot) => ({ shot, status: "queued", label: "等待生成", asset_url: "" }));
+        renderKeyframeProgress(records);
+        for (let index = 0; index < records.length; index += 1) {
+          const record = records[index];
+          record.status = "running";
+          record.label = "生成中";
+          renderKeyframeProgress(records);
+          try {
+            const response = await fetch(`${shotApiBase}${encodeURIComponent(record.shot.shot_id)}/keyframe`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                prompt: record.shot.keyframe_prompt || "",
+                negative_prompt: record.shot.negative_prompt || "",
+              }),
+            });
+            const payload = await response.json();
+            if (!response.ok) {
+              throw new Error(payload.error || "生成失败");
+            }
+            record.status = "done";
+            record.label = payload.model ? `已生成 · ${payload.model}` : "已生成";
+            record.asset_url = payload.asset_url || "";
+            shots = shots.map((item) => (item.shot_id === payload.shot.shot_id ? payload.shot : item));
+            record.shot = payload.shot;
+            renderShotList();
+            if (activeShotId === payload.shot.shot_id) {
+              renderActiveShot();
+            }
+          } catch (error) {
+            record.status = "failed";
+            record.label = error.message || "生成失败";
+          }
+          renderKeyframeProgress(records);
+        }
+        batchKeyframeButton.disabled = false;
+        editorStatus.textContent = "批量关键帧生成已结束";
+      }
+
       function parseCommaList(value) {
         return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+      }
+
+      function parseJsonField(name, label) {
+        try {
+          return JSON.parse(form[name].value || "{}");
+        } catch (error) {
+          editorStatus.textContent = `${label} 需要是合法 JSON`;
+          return null;
+        }
       }
 
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const shot = shots.find((item) => item.shot_id === activeShotId);
         if (!shot) return;
-        let camera = {};
-        try {
-          camera = JSON.parse(form.camera.value || "{}");
-        } catch (error) {
-          editorStatus.textContent = "camera 需要是合法 JSON";
-          return;
-        }
+        const camera = parseJsonField("camera", "camera");
+        const continuity = parseJsonField("continuity", "continuity");
+        const productionPlan = parseJsonField("production_plan", "production_plan");
+        const promptParts = parseJsonField("prompt_parts", "prompt_parts");
+        if (!camera || !continuity || !productionPlan || !promptParts) return;
         const scene = scenes.find((item) => item.scene_id === form.scene_id.value);
         const subjectIds = parseCommaList(form.subject_ids.value);
         const subjectNames = subjectIds.map((subjectId) => {
@@ -259,12 +766,28 @@
             shot_type: form.shot_type.value,
             duration_sec: Number(form.duration_sec.value || 4),
             visual_goal: form.visual_goal.value,
+            source_paragraph_index: Number(form.source_paragraph_index.value || 0),
+            source_text_start: Number(form.source_text_start.value || 0),
+            source_text_end: Number(form.source_text_end.value || 0),
+            source_excerpt: form.source_excerpt.value,
+            is_supplemental: form.is_supplemental.checked,
+            supplemental_reason: form.supplemental_reason.value,
+            sequence_id: form.sequence_id.value,
+            sequence_title: form.sequence_title.value,
+            beat_id: form.beat_id.value,
+            beat_title: form.beat_title.value,
+            prev_shot_id: form.prev_shot_id.value,
+            next_shot_id: form.next_shot_id.value,
+            transition: form.transition.value,
             scene_id: form.scene_id.value,
             scene_name: scene ? scene.canonical_name : "",
             subject_ids: subjectIds,
             subject_names: subjectNames,
             visual_elements: parseCommaList(form.visual_elements.value),
             camera,
+            continuity,
+            production_plan: productionPlan,
+            prompt_parts: promptParts,
             keyframe_prompt: form.keyframe_prompt.value,
             video_prompt: form.video_prompt.value,
             negative_prompt: form.negative_prompt.value,
@@ -286,9 +809,7 @@
       document.querySelector("#singleKeyframeButton").addEventListener("click", () => {
         editorStatus.textContent = arkReady ? "关键帧生成接口将在下一阶段接入。" : "未配置 ARK_API_KEY，无法调用 Seedream 生成关键帧。";
       });
-      document.querySelector("#batchKeyframeButton").addEventListener("click", () => {
-        editorStatus.textContent = arkReady ? "批量关键帧生成将在下一阶段接入。" : "未配置 ARK_API_KEY，无法调用 Seedream 生成关键帧。";
-      });
+      batchKeyframeButton.addEventListener("click", runBatchKeyframes);
       document.querySelector("#deleteStoryboardButton").addEventListener("click", async () => {
         if (!window.confirm("删除这条分镜记录？")) return;
         const response = await fetch(`/api/storyboards/${encodeURIComponent(storyboard.storyboard_id)}`, { method: "DELETE" });
@@ -311,6 +832,7 @@
         }
       });
 
+      renderBoardInsights();
       renderShotList();
       renderActiveShot();
     </script>

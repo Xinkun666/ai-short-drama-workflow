@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import urllib.error
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from drama_agents.chapter_refiner import parse_json_object
-from drama_agents.storage import MaterialDatabase
+from drama_agents.storage import MaterialDatabase, current_timestamp
 
 
 class ScriptAgent:
@@ -82,7 +83,7 @@ class ScriptAgent:
             "generation_id": script_dir.name,
             "status": "completed",
             "message": "剧本生成完成，已根据审查意见返修。" if revision_count else "剧本生成完成，审查通过。",
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at": current_timestamp(),
             "topic": clean_topic,
             "time_range": clean_time_range,
             "time_start_year": start_year,
@@ -161,6 +162,28 @@ class ScriptAgent:
         }
         return normalize_edit_payload(self.provider.edit_selection(payload))
 
+    def adapt_for_storyboard(self, *, generation: dict[str, Any]) -> dict[str, Any]:
+        if not self.provider:
+            raise RuntimeError("未配置 DEEPSEEK_API_KEY，无法改造分镜剧本。")
+        if not hasattr(self.provider, "adapt_script_for_storyboard"):
+            raise RuntimeError("当前剧本 provider 不支持剧本改造。")
+        script = generation.get("script") if isinstance(generation.get("script"), dict) else {}
+        article = str(script.get("article") or "").strip()
+        if not article:
+            raise ValueError("当前剧本没有完整正文，无法改造为分镜剧本。")
+        payload = {
+            "topic": generation.get("topic", ""),
+            "time_range": generation.get("time_range", ""),
+            "script": script,
+            "article": article,
+            "matched_events": generation.get("matched_events") or [],
+        }
+        adapted = normalize_storyboard_script_payload(self.provider.adapt_script_for_storyboard(payload), fallback_article=article)
+        adapted["created_at"] = current_timestamp()
+        adapted["source_article_hash"] = text_hash(article)
+        adapted["source_title"] = str(script.get("title") or generation.get("topic") or "")
+        return adapted
+
 
 class DeepSeekScriptProvider:
     def __init__(
@@ -234,6 +257,18 @@ class DeepSeekScriptProvider:
             prompt=build_assistant_prompt(payload, intent=intent),
             temperature=0.45,
             max_tokens=int(os.environ.get("SCRIPT_EDIT_MAX_TOKENS", "3600")),
+        )
+
+    def adapt_script_for_storyboard(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._complete_json(
+            system=(
+                "你是有 30 年纪录片、动画科普和短剧导演经验的分镜剧本改造 Agent。"
+                "你负责把文章式历史科普旁白改造成可直接进入卡通科普短剧分镜的生产脚本。"
+                "只输出合法 JSON。"
+            ),
+            prompt=build_storyboard_script_adaptation_prompt(payload),
+            temperature=0.35,
+            max_tokens=int(os.environ.get("SCRIPT_ADAPTATION_MAX_TOKENS", "12000")),
         )
 
     def _complete_json(self, *, system: str, prompt: str, temperature: float, max_tokens: int) -> dict[str, Any]:
@@ -415,6 +450,10 @@ def response_preview(content: str, *, finish_reason: Any = None, model: Any = No
     return "；".join(parts)
 
 
+def text_hash(value: str) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
 def parse_llm_json_object(content: str) -> dict[str, Any]:
     try:
         return parse_json_object(content)
@@ -551,9 +590,61 @@ Step 5：输出事实边界提醒。区分原始材料明确支持、合理场�
 主题：{payload.get("topic", "")}
 时间范围：{payload.get("time_range", "")}
 
-可用时间线材料：
-{events_text}
-""".strip()
+	可用时间线材料：
+	{events_text}
+	""".strip()
+
+
+def build_storyboard_script_adaptation_prompt(payload: dict[str, Any]) -> str:
+    script = payload.get("script") if isinstance(payload.get("script"), dict) else {}
+    source = {
+        "topic": payload.get("topic", ""),
+        "time_range": payload.get("time_range", ""),
+        "title": script.get("title", ""),
+        "logline": script.get("logline", ""),
+        "article": payload.get("article", ""),
+        "outline": script.get("outline") or [],
+        "causal_chain": script.get("causal_chain") or [],
+        "fact_cards": script.get("fact_cards") or [],
+        "fact_boundaries": script.get("fact_boundaries") or {},
+    }
+    return (
+        "你是拥有 30 年纪录片、动画科普、短剧导演和总编剧经验的剧本改造 Agent。\n"
+        "你的任务不是再写一篇更华丽的文章，而是把“内容正确的文章式旁白稿”改造成"
+        "“可直接交给卡通科普短剧分镜 Agent 的生产脚本”。\n\n"
+        "硬性边界：\n"
+        "1. 不新增未经 fact_cards、causal_chain、outline 或原 article 支持的史实。\n"
+        "2. 不输出主体锚点、场景锚点、图片 prompt、分镜镜头表或 keyframe prompt。\n"
+        "3. 可以重排、合并、拆分和润色旁白，让它更适合视听表达，但必须保留事实链条。\n"
+        "4. 删除或合并只重复观点、没有新剧情推动的句子。\n"
+        "5. 每个段落都必须服务一种剧情功能：开场钩子、冲突建立、身份揭示、机制解释、过程展示、地图转场、反差/纠错、主题回扣。\n"
+        "6. 适合历史科普卡通短剧：普通段落优先地图、地貌、群体剪影、图解、字幕、箭头、轻运动；关键段落才需要强漫画构图。\n\n"
+        "输出要求：只输出严格 JSON object，格式如下：\n"
+        "{\n"
+        '  "title": "分镜剧本标题",\n'
+        '  "adapted_article": "改造后的完整旁白稿，按自然段用 \\n\\n 分隔",\n'
+        '  "adapted_segments": [\n'
+        "    {\n"
+        '      "segment_id": "seg-001",\n'
+        '      "voiceover": "这一段最终旁白",\n'
+        '      "dramatic_function": "开场钩子/冲突建立/身份揭示/机制解释/地图转场/主题回扣",\n'
+        '      "visual_goal": "这一段画面要完成什么",\n'
+        '      "visual_progression": "相对上一段推进了什么，必须避免重复画面",\n'
+        '      "scene_intent": "地图/群像/图解/主体动作/道具特写/转场/蒙太奇",\n'
+        '      "continuity_hint": "和上一段或下一段如何衔接",\n'
+        '      "fact_boundary": "史实明确支持/合理场景化/需人工核对"\n'
+        "    }\n"
+        "  ],\n"
+        '  "adaptation_notes": ["你做了哪些生产化改造"],\n'
+        '  "review_notes": ["仍需人工注意的问题"]\n'
+        "}\n\n"
+        "分段要求：\n"
+        "- adapted_segments 必须覆盖 adapted_article 的主要内容。\n"
+        "- 每个 segment 通常 1-3 句旁白，不要把整篇文章塞成一个 segment。\n"
+        "- visual_progression 必须说清楚与上一段相比画面/剧情推进了什么。\n"
+        "- 如果连续两段会生成几乎一样的画面，必须合并或改写其中一段。\n\n"
+        f"输入剧本：\n{json.dumps(source, ensure_ascii=False, indent=2)}"
+    ).strip()
 
 
 def build_review_prompt(source_payload: dict[str, Any], draft: dict[str, Any]) -> str:
@@ -1083,6 +1174,50 @@ def normalize_script_payload(payload: dict[str, Any], topic: str) -> dict[str, A
         "fact_boundaries": normalize_fact_boundaries(payload.get("fact_boundaries")),
         "script": scenes,
     }
+
+
+def normalize_storyboard_script_payload(payload: dict[str, Any], *, fallback_article: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("剧本改造 Agent 返回不是 JSON object")
+    segments = normalize_adapted_segments(payload.get("adapted_segments"))
+    adapted_article = str(payload.get("adapted_article") or "").strip()
+    if not adapted_article and segments:
+        adapted_article = "\n\n".join(segment["voiceover"] for segment in segments if segment.get("voiceover")).strip()
+    if not adapted_article:
+        adapted_article = fallback_article
+    return {
+        "title": str(payload.get("title") or "分镜剧本"),
+        "adapted_article": adapted_article,
+        "adapted_segments": segments,
+        "adaptation_notes": normalize_string_list(payload.get("adaptation_notes")),
+        "review_notes": normalize_string_list(payload.get("review_notes")),
+        "raw": payload,
+    }
+
+
+def normalize_adapted_segments(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    segments = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        voiceover = str(item.get("voiceover") or item.get("narration") or "").strip()
+        if not voiceover:
+            continue
+        segments.append(
+            {
+                "segment_id": str(item.get("segment_id") or f"seg-{index:03d}"),
+                "voiceover": voiceover,
+                "dramatic_function": str(item.get("dramatic_function") or ""),
+                "visual_goal": str(item.get("visual_goal") or ""),
+                "visual_progression": str(item.get("visual_progression") or ""),
+                "scene_intent": str(item.get("scene_intent") or ""),
+                "continuity_hint": str(item.get("continuity_hint") or ""),
+                "fact_boundary": str(item.get("fact_boundary") or ""),
+            }
+        )
+    return segments
 
 
 def normalize_fact_cards(value: Any) -> list[dict[str, str]]:

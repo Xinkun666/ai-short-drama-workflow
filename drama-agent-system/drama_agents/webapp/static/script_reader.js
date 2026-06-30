@@ -5,12 +5,15 @@
   }
 
   const generationId = root.dataset.scriptReader;
+  const pageShell = root.closest(".script-page-shell") || root;
   const display = root.querySelector("[data-script-display]");
   const editor = root.querySelector("[data-script-editor]");
   const editStart = root.querySelector("[data-edit-start]");
   const editSave = root.querySelector("[data-edit-save]");
   const editCancel = root.querySelector("[data-edit-cancel]");
   const editStatus = root.querySelector("[data-edit-status]");
+  const adaptButton = pageShell.querySelector("[data-script-adapt]");
+  const adaptStatus = pageShell.querySelector("[data-script-adapt-status]");
   const ragChat = root.querySelector("[data-rag-chat]");
   const ragComposer = root.querySelector("[data-rag-composer]");
   const ragAsk = root.querySelector("[data-rag-ask]");
@@ -555,6 +558,31 @@
     window.location.reload();
   }
 
+  async function adaptStoryboardScript() {
+    if (!adaptButton || !adaptStatus) {
+      return;
+    }
+    adaptButton.disabled = true;
+    adaptStatus.textContent = "正在改造分镜剧本...";
+    try {
+      const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/storyboard-script/adapt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        adaptStatus.textContent = payload.error || "剧本改造失败";
+        adaptButton.disabled = false;
+        return;
+      }
+      adaptStatus.textContent = "分镜剧本已生成，正在刷新...";
+      window.setTimeout(() => window.location.reload(), 450);
+    } catch (error) {
+      adaptStatus.textContent = "剧本改造失败，请稍后重试。";
+      adaptButton.disabled = false;
+    }
+  }
+
   async function askAgent() {
     if (isSendingAssistantMessage) {
       return;
@@ -671,6 +699,9 @@
     setEditMode(false);
   });
   editSave.addEventListener("click", saveArticle);
+  if (adaptButton) {
+    adaptButton.addEventListener("click", adaptStoryboardScript);
+  }
   if (assistantEnabled) {
     conversationNew.addEventListener("click", () => createConversation("新对话", { load: true }));
     if (conversationMore) {

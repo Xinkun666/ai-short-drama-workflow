@@ -47,7 +47,7 @@ class MaterialDatabase:
                     links_json TEXT NOT NULL DEFAULT '{}',
                     warnings_json TEXT NOT NULL DEFAULT '[]',
                     raw_json TEXT NOT NULL DEFAULT '{}',
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS material_chapters (
@@ -127,7 +127,7 @@ class MaterialDatabase:
                     json_path TEXT NOT NULL DEFAULT '',
                     markdown_path TEXT NOT NULL DEFAULT '',
                     raw_json TEXT NOT NULL DEFAULT '{}',
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS script_assistant_messages (
@@ -148,15 +148,15 @@ class MaterialDatabase:
                     end_offset INTEGER,
                     result_json TEXT NOT NULL DEFAULT '{}',
                     contexts_json TEXT NOT NULL DEFAULT '[]',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS script_assistant_conversations (
                     conversation_id TEXT PRIMARY KEY,
                     generation_id TEXT NOT NULL,
                     title TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
                     last_message_preview TEXT NOT NULL DEFAULT '',
                     message_count INTEGER NOT NULL DEFAULT 0,
                     title_manual INTEGER NOT NULL DEFAULT 0,
@@ -186,7 +186,7 @@ class MaterialDatabase:
                     article_version_hash TEXT NOT NULL DEFAULT '',
                     answer TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'pending',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
                     applied_at TEXT NOT NULL DEFAULT ''
                 );
 
@@ -198,7 +198,7 @@ class MaterialDatabase:
                     article_version_hash TEXT NOT NULL DEFAULT '',
                     session_summary TEXT NOT NULL DEFAULT '',
                     style_preferences_json TEXT NOT NULL DEFAULT '[]',
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS visual_subjects (
@@ -219,8 +219,8 @@ class MaterialDatabase:
                     negative_prompt TEXT NOT NULL DEFAULT '',
                     workflow_name TEXT NOT NULL DEFAULT '',
                     raw_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS script_visual_subjects (
@@ -254,8 +254,8 @@ class MaterialDatabase:
                     negative_prompt TEXT NOT NULL DEFAULT '',
                     workflow_name TEXT NOT NULL DEFAULT '',
                     raw_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime'))
                 );
 
                 CREATE TABLE IF NOT EXISTS script_visual_scenes (
@@ -285,9 +285,11 @@ class MaterialDatabase:
                     missing_subject_candidates_json TEXT NOT NULL DEFAULT '[]',
                     missing_scene_candidates_json TEXT NOT NULL DEFAULT '[]',
                     review_notes_json TEXT NOT NULL DEFAULT '[]',
+                    coverage_json TEXT NOT NULL DEFAULT '{}',
+                    script_feedback_json TEXT NOT NULL DEFAULT '[]',
                     raw_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
                     FOREIGN KEY (generation_id) REFERENCES script_generations(generation_id) ON DELETE CASCADE
                 );
 
@@ -316,9 +318,45 @@ class MaterialDatabase:
                     keyframe_asset_id TEXT NOT NULL DEFAULT '',
                     video_asset_id TEXT NOT NULL DEFAULT '',
                     needs_manual_review INTEGER NOT NULL DEFAULT 0,
+                    source_paragraph_index INTEGER NOT NULL DEFAULT 0,
+                    source_text_start INTEGER NOT NULL DEFAULT 0,
+                    source_text_end INTEGER NOT NULL DEFAULT 0,
+                    source_excerpt TEXT NOT NULL DEFAULT '',
+                    is_supplemental INTEGER NOT NULL DEFAULT 0,
+                    supplemental_reason TEXT NOT NULL DEFAULT '',
+                    scene_block_id TEXT NOT NULL DEFAULT '',
+                    scene_block_title TEXT NOT NULL DEFAULT '',
+                    scene_block_index INTEGER NOT NULL DEFAULT 0,
+                    sequence_id TEXT NOT NULL DEFAULT '',
+                    sequence_title TEXT NOT NULL DEFAULT '',
+                    beat_id TEXT NOT NULL DEFAULT '',
+                    beat_title TEXT NOT NULL DEFAULT '',
+                    prev_shot_id TEXT NOT NULL DEFAULT '',
+                    next_shot_id TEXT NOT NULL DEFAULT '',
+                    transition TEXT NOT NULL DEFAULT 'cut',
+                    continuity_json TEXT NOT NULL DEFAULT '{}',
+                    production_plan_json TEXT NOT NULL DEFAULT '{}',
+                    prompt_parts_json TEXT NOT NULL DEFAULT '{}',
                     raw_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
+                    FOREIGN KEY (storyboard_id) REFERENCES storyboards(storyboard_id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS storyboard_shot_asset_candidates (
+                    candidate_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    storyboard_id TEXT NOT NULL,
+                    shot_id TEXT NOT NULL,
+                    candidate_type TEXT NOT NULL,
+                    candidate_name TEXT NOT NULL,
+                    candidate_status TEXT NOT NULL DEFAULT 'pending',
+                    linked_entity_id TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT 'storyboard',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    confirmed_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y%m%d %H%M','now','localtime')),
+                    UNIQUE(shot_id, candidate_type, candidate_name),
                     FOREIGN KEY (storyboard_id) REFERENCES storyboards(storyboard_id) ON DELETE CASCADE
                 );
 
@@ -346,6 +384,8 @@ class MaterialDatabase:
                     ON storyboards(generation_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_storyboard_shots_storyboard
                     ON storyboard_shots(storyboard_id, shot_index);
+                CREATE INDEX IF NOT EXISTS idx_storyboard_shot_candidates_storyboard
+                    ON storyboard_shot_asset_candidates(storyboard_id, shot_id, candidate_status);
                 """
             )
             ensure_table_columns(
@@ -419,6 +459,39 @@ class MaterialDatabase:
                     "raw_json": "TEXT NOT NULL DEFAULT '{}'",
                 },
             )
+            ensure_table_columns(
+                connection,
+                "storyboards",
+                {
+                    "coverage_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "script_feedback_json": "TEXT NOT NULL DEFAULT '[]'",
+                },
+            )
+            ensure_table_columns(
+                connection,
+                "storyboard_shots",
+                {
+                    "source_paragraph_index": "INTEGER NOT NULL DEFAULT 0",
+                    "source_text_start": "INTEGER NOT NULL DEFAULT 0",
+                    "source_text_end": "INTEGER NOT NULL DEFAULT 0",
+                    "source_excerpt": "TEXT NOT NULL DEFAULT ''",
+                    "is_supplemental": "INTEGER NOT NULL DEFAULT 0",
+                    "supplemental_reason": "TEXT NOT NULL DEFAULT ''",
+                    "scene_block_id": "TEXT NOT NULL DEFAULT ''",
+                    "scene_block_title": "TEXT NOT NULL DEFAULT ''",
+                    "scene_block_index": "INTEGER NOT NULL DEFAULT 0",
+                    "sequence_id": "TEXT NOT NULL DEFAULT ''",
+                    "sequence_title": "TEXT NOT NULL DEFAULT ''",
+                    "beat_id": "TEXT NOT NULL DEFAULT ''",
+                    "beat_title": "TEXT NOT NULL DEFAULT ''",
+                    "prev_shot_id": "TEXT NOT NULL DEFAULT ''",
+                    "next_shot_id": "TEXT NOT NULL DEFAULT ''",
+                    "transition": "TEXT NOT NULL DEFAULT 'cut'",
+                    "continuity_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "production_plan_json": "TEXT NOT NULL DEFAULT '{}'",
+                    "prompt_parts_json": "TEXT NOT NULL DEFAULT '{}'",
+                },
+            )
             backfill_visual_phase_metadata(connection)
             connection.execute("DROP INDEX IF EXISTS idx_visual_subjects_canonical")
             connection.execute("DROP INDEX IF EXISTS idx_visual_scenes_canonical")
@@ -447,7 +520,7 @@ class MaterialDatabase:
                     chapter_count, excluded_count, refinement_status, refinement_message,
                     refined_chapter_count, timeline_status, timeline_message, timeline_event_count,
                     timeline_url, output_relative_path, detail_url, links_json, warnings_json, raw_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')))
                 ON CONFLICT(record_id) DO UPDATE SET
                     parsed_at=excluded.parsed_at,
                     book_name=excluded.book_name,
@@ -468,7 +541,7 @@ class MaterialDatabase:
                     links_json=excluded.links_json,
                     warnings_json=excluded.warnings_json,
                     raw_json=excluded.raw_json,
-                    updated_at=CURRENT_TIMESTAMP
+                    updated_at=(strftime('%Y%m%d %H%M','now','localtime'))
                 """,
                 record_values(normalized_record, warnings),
             )
@@ -546,7 +619,7 @@ class MaterialDatabase:
                 UPDATE material_records
                 SET book_name = ?,
                     raw_json = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
                 WHERE record_id = ?
                 """,
                 (clean_name, json_dumps(record), record_id),
@@ -577,7 +650,7 @@ class MaterialDatabase:
                     timeline_event_count = ?,
                     timeline_url = ?,
                     links_json = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
                 WHERE record_id = ?
                 """,
                 (
@@ -623,7 +696,7 @@ class MaterialDatabase:
                     generation_id, created_at, topic, time_range, time_start_year, time_end_year,
                     selected_record_ids_json, matched_events_json, script_json, subjects_json,
                     map_shots_json, status, message, json_path, markdown_path, raw_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')))
                 ON CONFLICT(generation_id) DO UPDATE SET
                     created_at=excluded.created_at,
                     topic=excluded.topic,
@@ -640,7 +713,7 @@ class MaterialDatabase:
                     json_path=excluded.json_path,
                     markdown_path=excluded.markdown_path,
                     raw_json=excluded.raw_json,
-                    updated_at=CURRENT_TIMESTAMP
+                    updated_at=(strftime('%Y%m%d %H%M','now','localtime'))
                 """,
                 script_generation_values(result),
             )
@@ -674,7 +747,30 @@ class MaterialDatabase:
                 UPDATE script_generations
                 SET script_json = ?,
                     raw_json = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
+                WHERE generation_id = ?
+                """,
+                (json_dumps(script), json_dumps(current), generation_id),
+            )
+        updated = self.find_script_generation(generation_id)
+        if not updated:
+            raise KeyError(generation_id)
+        return updated
+
+    def update_script_storyboard_script(self, generation_id: str, storyboard_script: dict[str, Any]) -> dict[str, Any]:
+        current = self.find_script_generation(generation_id)
+        if not current:
+            raise KeyError(generation_id)
+        script = dict(current.get("script") or {})
+        script["storyboard_script"] = dict(storyboard_script or {})
+        current["script"] = script
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE script_generations
+                SET script_json = ?,
+                    raw_json = ?,
+                    updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
                 WHERE generation_id = ?
                 """,
                 (json_dumps(script), json_dumps(current), generation_id),
@@ -697,6 +793,9 @@ class MaterialDatabase:
         actual_duration = sum(float(shot["duration_sec"]) for shot in shots)
         target_duration = safe_int(payload.get("target_duration_sec"), default=0)
         status = str(payload.get("status") or ("needs_review" if any(shot["needs_manual_review"] for shot in shots) else "completed"))
+        raw_payload = payload.get("raw") if isinstance(payload.get("raw"), dict) else dict(payload)
+        scene_blocks = payload.get("scene_blocks") if isinstance(payload.get("scene_blocks"), list) else []
+        raw_payload["scene_blocks"] = scene_blocks
         normalized = {
             "storyboard_id": storyboard_id,
             "generation_id": generation_id,
@@ -711,7 +810,10 @@ class MaterialDatabase:
             "missing_subject_candidates": payload.get("missing_subject_candidates") if isinstance(payload.get("missing_subject_candidates"), list) else [],
             "missing_scene_candidates": payload.get("missing_scene_candidates") if isinstance(payload.get("missing_scene_candidates"), list) else [],
             "review_notes": payload.get("review_notes") if isinstance(payload.get("review_notes"), list) else [],
-            "raw": payload.get("raw") if isinstance(payload.get("raw"), dict) else payload,
+            "coverage": payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {},
+            "script_feedback": payload.get("script_feedback") if isinstance(payload.get("script_feedback"), list) else [],
+            "scene_blocks": scene_blocks,
+            "raw": raw_payload,
         }
         with self.connect() as connection:
             connection.execute(
@@ -720,9 +822,10 @@ class MaterialDatabase:
                     storyboard_id, generation_id, title, source_type, source_filename,
                     status, target_duration_sec, actual_duration_sec, shot_count,
                     style_policy_json, missing_subject_candidates_json,
-                    missing_scene_candidates_json, review_notes_json, raw_json,
+                    missing_scene_candidates_json, review_notes_json,
+                    coverage_json, script_feedback_json, raw_json,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')), (strftime('%Y%m%d %H%M','now','localtime')))
                 ON CONFLICT(storyboard_id) DO UPDATE SET
                     generation_id=excluded.generation_id,
                     title=excluded.title,
@@ -736,8 +839,10 @@ class MaterialDatabase:
                     missing_subject_candidates_json=excluded.missing_subject_candidates_json,
                     missing_scene_candidates_json=excluded.missing_scene_candidates_json,
                     review_notes_json=excluded.review_notes_json,
+                    coverage_json=excluded.coverage_json,
+                    script_feedback_json=excluded.script_feedback_json,
                     raw_json=excluded.raw_json,
-                    updated_at=CURRENT_TIMESTAMP
+                    updated_at=(strftime('%Y%m%d %H%M','now','localtime'))
                 """,
                 storyboard_values(normalized),
             )
@@ -752,11 +857,18 @@ class MaterialDatabase:
                         visual_elements_json, reference_assets_json, camera_json,
                         duration_sec, keyframe_prompt, video_prompt, negative_prompt,
                         fact_safety_note, asset_status, keyframe_asset_id, video_asset_id,
-                        needs_manual_review, raw_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        needs_manual_review, source_paragraph_index, source_text_start,
+                        source_text_end, source_excerpt, is_supplemental,
+                        supplemental_reason, scene_block_id, scene_block_title,
+                        scene_block_index, sequence_id, sequence_title, beat_id,
+                        beat_title, prev_shot_id, next_shot_id, transition,
+                        continuity_json, production_plan_json, prompt_parts_json,
+                        raw_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')), (strftime('%Y%m%d %H%M','now','localtime')))
                     """,
                     storyboard_shot_values(shot),
                 )
+            sync_storyboard_shot_candidates(connection, storyboard_id, shots, replace_storyboard=True)
         saved = self.find_storyboard(storyboard_id)
         if not saved:
             raise KeyError(storyboard_id)
@@ -854,6 +966,25 @@ class MaterialDatabase:
             "keyframe_asset_id",
             "video_asset_id",
             "needs_manual_review",
+            "source_paragraph_index",
+            "source_text_start",
+            "source_text_end",
+            "source_excerpt",
+            "is_supplemental",
+            "supplemental_reason",
+            "scene_block_id",
+            "scene_block_title",
+            "scene_block_index",
+            "sequence_id",
+            "sequence_title",
+            "beat_id",
+            "beat_title",
+            "prev_shot_id",
+            "next_shot_id",
+            "transition",
+            "continuity",
+            "production_plan",
+            "prompt_parts",
         ):
             if key in updates:
                 merged[key] = updates[key]
@@ -891,8 +1022,27 @@ class MaterialDatabase:
                     keyframe_asset_id = ?,
                     video_asset_id = ?,
                     needs_manual_review = ?,
+                    source_paragraph_index = ?,
+                    source_text_start = ?,
+                    source_text_end = ?,
+                    source_excerpt = ?,
+                    is_supplemental = ?,
+                    supplemental_reason = ?,
+                    scene_block_id = ?,
+                    scene_block_title = ?,
+                    scene_block_index = ?,
+                    sequence_id = ?,
+                    sequence_title = ?,
+                    beat_id = ?,
+                    beat_title = ?,
+                    prev_shot_id = ?,
+                    next_shot_id = ?,
+                    transition = ?,
+                    continuity_json = ?,
+                    production_plan_json = ?,
+                    prompt_parts_json = ?,
                     raw_json = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
                 WHERE storyboard_id = ? AND shot_id = ?
                 """,
                 (
@@ -916,16 +1066,178 @@ class MaterialDatabase:
                     normalized["keyframe_asset_id"],
                     normalized["video_asset_id"],
                     1 if normalized.get("needs_manual_review") else 0,
+                    normalized["source_paragraph_index"],
+                    normalized["source_text_start"],
+                    normalized["source_text_end"],
+                    normalized["source_excerpt"],
+                    1 if normalized.get("is_supplemental") else 0,
+                    normalized["supplemental_reason"],
+                    normalized["scene_block_id"],
+                    normalized["scene_block_title"],
+                    normalized["scene_block_index"],
+                    normalized["sequence_id"],
+                    normalized["sequence_title"],
+                    normalized["beat_id"],
+                    normalized["beat_title"],
+                    normalized["prev_shot_id"],
+                    normalized["next_shot_id"],
+                    normalized["transition"],
+                    json_dumps(normalized.get("continuity") or {}),
+                    json_dumps(normalized.get("production_plan") or {}),
+                    json_dumps(normalized.get("prompt_parts") or {}),
                     json_dumps(normalized.get("raw") or {}),
                     storyboard_id,
                     shot_id,
                 ),
             )
+            sync_storyboard_shot_candidates(connection, storyboard_id, [normalized], replace_storyboard=False)
             refresh_storyboard_totals(connection, storyboard_id)
         updated = next((shot for shot in self.list_storyboard_shots(storyboard_id) if shot["shot_id"] == shot_id), None)
         if not updated:
             raise KeyError(shot_id)
         return updated
+
+    def list_storyboard_shot_candidates(
+        self,
+        storyboard_id: str,
+        shot_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            if shot_id:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM storyboard_shot_asset_candidates
+                    WHERE storyboard_id = ? AND shot_id = ?
+                    ORDER BY candidate_type, candidate_id
+                    """,
+                    (storyboard_id, shot_id),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT *
+                    FROM storyboard_shot_asset_candidates
+                    WHERE storyboard_id = ?
+                    ORDER BY shot_id, candidate_type, candidate_id
+                    """,
+                    (storyboard_id,),
+                ).fetchall()
+        return [storyboard_shot_candidate_from_row(row) for row in rows]
+
+    def mark_storyboard_shot_candidate_linked(
+        self,
+        storyboard_id: str,
+        shot_id: str,
+        candidate_id: int,
+        *,
+        linked_entity_id: str = "",
+    ) -> dict[str, Any]:
+        return self.update_storyboard_shot_candidate_status(
+            storyboard_id,
+            shot_id,
+            candidate_id,
+            candidate_status="linked",
+            linked_entity_id=linked_entity_id,
+        )
+
+    def mark_storyboard_shot_candidate_ignored(
+        self,
+        storyboard_id: str,
+        shot_id: str,
+        candidate_id: int,
+    ) -> dict[str, Any]:
+        return self.update_storyboard_shot_candidate_status(
+            storyboard_id,
+            shot_id,
+            candidate_id,
+            candidate_status="ignored",
+        )
+
+    def update_storyboard_shot_candidate_status(
+        self,
+        storyboard_id: str,
+        shot_id: str,
+        candidate_id: int,
+        *,
+        candidate_status: str,
+        linked_entity_id: str = "",
+    ) -> dict[str, Any]:
+        if candidate_status not in {"pending", "linked", "ignored"}:
+            raise ValueError(candidate_status)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM storyboard_shot_asset_candidates
+                WHERE storyboard_id = ? AND shot_id = ? AND candidate_id = ?
+                """,
+                (storyboard_id, shot_id, candidate_id),
+            ).fetchone()
+            if not row:
+                raise KeyError(str(candidate_id))
+            candidate = storyboard_shot_candidate_from_row(row)
+            resolved_linked_entity_id = (
+                str(linked_entity_id or candidate.get("linked_entity_id") or "")
+                if candidate_status == "linked"
+                else ""
+            )
+            connection.execute(
+                """
+                UPDATE storyboard_shot_asset_candidates
+                SET candidate_status = ?,
+                    linked_entity_id = ?,
+                    confirmed_at = ?,
+                    updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
+                WHERE candidate_id = ?
+                """,
+                (candidate_status, resolved_linked_entity_id, current_timestamp(), candidate_id),
+            )
+            if candidate_status == "linked" and resolved_linked_entity_id:
+                apply_candidate_link_to_storyboard_shot(connection, candidate, resolved_linked_entity_id)
+            updated = connection.execute(
+                "SELECT * FROM storyboard_shot_asset_candidates WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+        if not updated:
+            raise KeyError(str(candidate_id))
+        return storyboard_shot_candidate_from_row(updated)
+
+    def build_storyboard_shot_preparation_state(self, storyboard_id: str, shot_id: str) -> dict[str, Any]:
+        storyboard = self.find_storyboard(storyboard_id)
+        if not storyboard:
+            raise KeyError(storyboard_id)
+        shot = next((item for item in self.list_storyboard_shots(storyboard_id) if item["shot_id"] == shot_id), None)
+        if not shot:
+            raise KeyError(shot_id)
+        candidates = self.list_storyboard_shot_candidates(storyboard_id, shot_id)
+        pending_candidates = [item for item in candidates if item["candidate_status"] == "pending"]
+        linked_candidates = [item for item in candidates if item["candidate_status"] == "linked"]
+        ignored_candidates = [item for item in candidates if item["candidate_status"] == "ignored"]
+        basic_info_ready = bool((shot.get("narration") or shot.get("source_excerpt") or "").strip()) and safe_float(
+            shot.get("duration_sec"),
+            default=0.0,
+        ) > 0
+        prompt_ready = bool(str(shot.get("keyframe_prompt") or "").strip())
+        reference_asset_count = count_reference_assets(shot.get("reference_assets") or {})
+        missing_reference_asset_count = count_missing_reference_assets(shot.get("reference_assets") or {})
+        ready_for_keyframe = basic_info_ready and prompt_ready and not pending_candidates
+        return {
+            "storyboard_id": storyboard_id,
+            "shot_id": shot_id,
+            "status": "ready" if ready_for_keyframe else "pending",
+            "shot": shot,
+            "candidates": candidates,
+            "candidate_count": len(candidates),
+            "pending_candidate_count": len(pending_candidates),
+            "linked_candidate_count": len(linked_candidates),
+            "ignored_candidate_count": len(ignored_candidates),
+            "reference_asset_count": reference_asset_count,
+            "missing_reference_asset_count": missing_reference_asset_count,
+            "basic_info_ready": basic_info_ready,
+            "prompt_ready": prompt_ready,
+            "ready_for_keyframe": ready_for_keyframe,
+        }
 
     def delete_script_generation(self, generation_id: str) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -962,7 +1274,7 @@ class MaterialDatabase:
                         short_description, visual_identity_json, consistency_rules_json,
                         negative_rules_json, status, anchor_asset_id, visual_prompt,
                         negative_prompt, workflow_name, raw_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')), (strftime('%Y%m%d %H%M','now','localtime')))
                     ON CONFLICT(subject_id) DO UPDATE SET
                         canonical_name=excluded.canonical_name,
                         visual_phase_key=excluded.visual_phase_key,
@@ -980,7 +1292,7 @@ class MaterialDatabase:
                         negative_prompt=excluded.negative_prompt,
                         workflow_name=excluded.workflow_name,
                         raw_json=excluded.raw_json,
-                        updated_at=CURRENT_TIMESTAMP
+                        updated_at=(strftime('%Y%m%d %H%M','now','localtime'))
                     """,
                     visual_subject_values(subject),
                 )
@@ -1122,7 +1434,7 @@ class MaterialDatabase:
                     negative_prompt = ?,
                     workflow_name = ?,
                     raw_json = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
                 WHERE subject_id = ?
                 """,
                 (*visual_subject_values(normalized)[1:], subject_id),
@@ -1162,7 +1474,7 @@ class MaterialDatabase:
                         short_description, visual_identity_json, consistency_rules_json,
                         negative_rules_json, status, anchor_asset_id, visual_prompt,
                         negative_prompt, workflow_name, raw_json, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')), (strftime('%Y%m%d %H%M','now','localtime')))
                     ON CONFLICT(scene_id) DO UPDATE SET
                         canonical_name=excluded.canonical_name,
                         visual_phase_key=excluded.visual_phase_key,
@@ -1180,7 +1492,7 @@ class MaterialDatabase:
                         negative_prompt=excluded.negative_prompt,
                         workflow_name=excluded.workflow_name,
                         raw_json=excluded.raw_json,
-                        updated_at=CURRENT_TIMESTAMP
+                        updated_at=(strftime('%Y%m%d %H%M','now','localtime'))
                     """,
                     visual_scene_values(scene),
                 )
@@ -1322,7 +1634,7 @@ class MaterialDatabase:
                     negative_prompt = ?,
                     workflow_name = ?,
                     raw_json = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
                 WHERE scene_id = ?
                 """,
                 (*visual_scene_values(normalized)[1:], scene_id),
@@ -1419,7 +1731,7 @@ class MaterialDatabase:
                     """
                     SELECT * FROM script_assistant_conversations
                     WHERE generation_id = ?
-                    ORDER BY updated_at DESC, conversation_id DESC
+                    ORDER BY updated_at DESC, message_count DESC, rowid DESC
                     """,
                     (generation_id,),
                 ).fetchall()
@@ -1428,7 +1740,7 @@ class MaterialDatabase:
                     """
                     SELECT * FROM script_assistant_conversations
                     WHERE generation_id = ? AND is_archived = 0
-                    ORDER BY updated_at DESC, conversation_id DESC
+                    ORDER BY updated_at DESC, message_count DESC, rowid DESC
                     """,
                     (generation_id,),
                 ).fetchall()
@@ -1810,7 +2122,7 @@ class MaterialDatabase:
                 """
                 UPDATE script_edit_patches
                 SET status = 'applied',
-                    applied_at = CURRENT_TIMESTAMP
+                    applied_at = (strftime('%Y%m%d %H%M','now','localtime'))
                 WHERE patch_id = ?
                 """,
                 (patch_id,),
@@ -1822,7 +2134,7 @@ class MaterialDatabase:
                 """
                 UPDATE script_edit_patches
                 SET status = ?,
-                    applied_at = CASE WHEN ? = 'applied' THEN CURRENT_TIMESTAMP ELSE applied_at END
+                    applied_at = CASE WHEN ? = 'applied' THEN (strftime('%Y%m%d %H%M','now','localtime')) ELSE applied_at END
                 WHERE patch_id = ?
                 """,
                 (status, status, patch_id),
@@ -1864,7 +2176,7 @@ class MaterialDatabase:
                 INSERT INTO script_assistant_state (
                     generation_id, active_intent, active_selection_id, active_patch_id,
                     article_version_hash, session_summary, style_preferences_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')))
                 ON CONFLICT(generation_id) DO UPDATE SET
                     active_intent=excluded.active_intent,
                     active_selection_id=excluded.active_selection_id,
@@ -1872,7 +2184,7 @@ class MaterialDatabase:
                     article_version_hash=excluded.article_version_hash,
                     session_summary=excluded.session_summary,
                     style_preferences_json=excluded.style_preferences_json,
-                    updated_at=CURRENT_TIMESTAMP
+                    updated_at=(strftime('%Y%m%d %H%M','now','localtime'))
                 """,
                 (
                     generation_id,
@@ -2154,6 +2466,8 @@ def storyboard_values(storyboard: dict[str, Any]) -> tuple[Any, ...]:
         json_dumps(storyboard.get("missing_subject_candidates") or []),
         json_dumps(storyboard.get("missing_scene_candidates") or []),
         json_dumps(storyboard.get("review_notes") or []),
+        json_dumps(storyboard.get("coverage") or {}),
+        json_dumps(storyboard.get("script_feedback") or []),
         json_dumps(storyboard.get("raw") or storyboard),
     )
 
@@ -2177,6 +2491,9 @@ def storyboard_from_row(row: sqlite3.Row) -> dict[str, Any]:
             "missing_subject_candidates": json_loads(row["missing_subject_candidates_json"], default=[]),
             "missing_scene_candidates": json_loads(row["missing_scene_candidates_json"], default=[]),
             "review_notes": json_loads(row["review_notes_json"], default=[]),
+            "coverage": json_loads(row["coverage_json"], default={}) if "coverage_json" in row.keys() else {},
+            "script_feedback": json_loads(row["script_feedback_json"], default=[]) if "script_feedback_json" in row.keys() else [],
+            "scene_blocks": raw.get("scene_blocks") if isinstance(raw.get("scene_blocks"), list) else [],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "topic": row["topic"] if "topic" in row.keys() else "",
@@ -2223,6 +2540,25 @@ def normalize_storyboard_shot_payload(
             "keyframe_asset_id": str(shot.get("keyframe_asset_id") or ""),
             "video_asset_id": str(shot.get("video_asset_id") or ""),
             "needs_manual_review": bool(shot.get("needs_manual_review")),
+            "source_paragraph_index": safe_int(shot.get("source_paragraph_index"), default=0),
+            "source_text_start": safe_int(shot.get("source_text_start"), default=0),
+            "source_text_end": safe_int(shot.get("source_text_end"), default=0),
+            "source_excerpt": str(shot.get("source_excerpt") or ""),
+            "is_supplemental": bool(shot.get("is_supplemental")),
+            "supplemental_reason": str(shot.get("supplemental_reason") or ""),
+            "scene_block_id": str(shot.get("scene_block_id") or ""),
+            "scene_block_title": str(shot.get("scene_block_title") or ""),
+            "scene_block_index": safe_int(shot.get("scene_block_index"), default=0),
+            "sequence_id": str(shot.get("sequence_id") or ""),
+            "sequence_title": str(shot.get("sequence_title") or ""),
+            "beat_id": str(shot.get("beat_id") or ""),
+            "beat_title": str(shot.get("beat_title") or ""),
+            "prev_shot_id": str(shot.get("prev_shot_id") or ""),
+            "next_shot_id": str(shot.get("next_shot_id") or ""),
+            "transition": str(shot.get("transition") or "cut"),
+            "continuity": shot.get("continuity") if isinstance(shot.get("continuity"), dict) else {},
+            "production_plan": shot.get("production_plan") if isinstance(shot.get("production_plan"), dict) else {},
+            "prompt_parts": shot.get("prompt_parts") if isinstance(shot.get("prompt_parts"), dict) else {},
             "raw": shot.get("raw") if isinstance(shot.get("raw"), dict) else shot,
         }
     )
@@ -2255,6 +2591,25 @@ def storyboard_shot_values(shot: dict[str, Any]) -> tuple[Any, ...]:
         shot.get("keyframe_asset_id", ""),
         shot.get("video_asset_id", ""),
         1 if shot.get("needs_manual_review") else 0,
+        safe_int(shot.get("source_paragraph_index"), default=0),
+        safe_int(shot.get("source_text_start"), default=0),
+        safe_int(shot.get("source_text_end"), default=0),
+        shot.get("source_excerpt", ""),
+        1 if shot.get("is_supplemental") else 0,
+        shot.get("supplemental_reason", ""),
+        shot.get("scene_block_id", ""),
+        shot.get("scene_block_title", ""),
+        safe_int(shot.get("scene_block_index"), default=0),
+        shot.get("sequence_id", ""),
+        shot.get("sequence_title", ""),
+        shot.get("beat_id", ""),
+        shot.get("beat_title", ""),
+        shot.get("prev_shot_id", ""),
+        shot.get("next_shot_id", ""),
+        shot.get("transition", "cut"),
+        json_dumps(shot.get("continuity") or {}),
+        json_dumps(shot.get("production_plan") or {}),
+        json_dumps(shot.get("prompt_parts") or {}),
         json_dumps(shot.get("raw") or shot),
     )
 
@@ -2288,12 +2643,277 @@ def storyboard_shot_from_row(row: sqlite3.Row) -> dict[str, Any]:
             "keyframe_asset_id": row["keyframe_asset_id"],
             "video_asset_id": row["video_asset_id"],
             "needs_manual_review": bool(row["needs_manual_review"]),
+            "source_paragraph_index": row["source_paragraph_index"] if "source_paragraph_index" in row.keys() else 0,
+            "source_text_start": row["source_text_start"] if "source_text_start" in row.keys() else 0,
+            "source_text_end": row["source_text_end"] if "source_text_end" in row.keys() else 0,
+            "source_excerpt": row["source_excerpt"] if "source_excerpt" in row.keys() else "",
+            "is_supplemental": bool(row["is_supplemental"]) if "is_supplemental" in row.keys() else False,
+            "supplemental_reason": row["supplemental_reason"] if "supplemental_reason" in row.keys() else "",
+            "scene_block_id": row["scene_block_id"] if "scene_block_id" in row.keys() else str(shot.get("scene_block_id") or ""),
+            "scene_block_title": row["scene_block_title"] if "scene_block_title" in row.keys() else str(shot.get("scene_block_title") or ""),
+            "scene_block_index": row["scene_block_index"] if "scene_block_index" in row.keys() else safe_int(shot.get("scene_block_index"), default=0),
+            "sequence_id": row["sequence_id"] if "sequence_id" in row.keys() else "",
+            "sequence_title": row["sequence_title"] if "sequence_title" in row.keys() else "",
+            "beat_id": row["beat_id"] if "beat_id" in row.keys() else "",
+            "beat_title": row["beat_title"] if "beat_title" in row.keys() else "",
+            "prev_shot_id": row["prev_shot_id"] if "prev_shot_id" in row.keys() else "",
+            "next_shot_id": row["next_shot_id"] if "next_shot_id" in row.keys() else "",
+            "transition": row["transition"] if "transition" in row.keys() else "cut",
+            "continuity": json_loads(row["continuity_json"], default={}) if "continuity_json" in row.keys() else {},
+            "production_plan": json_loads(row["production_plan_json"], default={}) if "production_plan_json" in row.keys() else {},
+            "prompt_parts": json_loads(row["prompt_parts_json"], default={}) if "prompt_parts_json" in row.keys() else {},
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "raw": raw,
         }
     )
     return shot
+
+
+def storyboard_shot_candidate_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "candidate_id": int(row["candidate_id"]),
+        "storyboard_id": row["storyboard_id"],
+        "shot_id": row["shot_id"],
+        "candidate_type": row["candidate_type"],
+        "candidate_name": row["candidate_name"],
+        "candidate_status": row["candidate_status"],
+        "linked_entity_id": row["linked_entity_id"],
+        "source": row["source"],
+        "payload": json_loads(row["payload_json"], default={}),
+        "confirmed_at": row["confirmed_at"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def sync_storyboard_shot_candidates(
+    connection: sqlite3.Connection,
+    storyboard_id: str,
+    shots: list[dict[str, Any]],
+    *,
+    replace_storyboard: bool,
+) -> None:
+    if not shots:
+        if replace_storyboard:
+            connection.execute(
+                "DELETE FROM storyboard_shot_asset_candidates WHERE storyboard_id = ?",
+                (storyboard_id,),
+            )
+        return
+    desired = []
+    for shot in shots:
+        desired.extend(extract_storyboard_shot_candidates(shot))
+    shot_ids = sorted({str(shot.get("shot_id") or "") for shot in shots if str(shot.get("shot_id") or "")})
+    if replace_storyboard:
+        rows = connection.execute(
+            "SELECT * FROM storyboard_shot_asset_candidates WHERE storyboard_id = ?",
+            (storyboard_id,),
+        ).fetchall()
+    else:
+        placeholders = ",".join("?" for _item in shot_ids)
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM storyboard_shot_asset_candidates
+            WHERE storyboard_id = ? AND shot_id IN ({placeholders})
+            """,
+            (storyboard_id, *shot_ids),
+        ).fetchall()
+    existing = {
+        (row["shot_id"], row["candidate_type"], row["candidate_name"]): storyboard_shot_candidate_from_row(row)
+        for row in rows
+    }
+    desired_keys = set()
+    for candidate in desired:
+        key = (candidate["shot_id"], candidate["candidate_type"], candidate["candidate_name"])
+        desired_keys.add(key)
+        previous = existing.get(key)
+        linked_entity_id = candidate.get("linked_entity_id", "")
+        candidate_status = "linked" if linked_entity_id else "pending"
+        confirmed_at = current_timestamp() if linked_entity_id else ""
+        if previous:
+            if previous["candidate_status"] in {"linked", "ignored"}:
+                candidate_status = previous["candidate_status"]
+                linked_entity_id = previous["linked_entity_id"]
+                confirmed_at = previous["confirmed_at"]
+            elif linked_entity_id:
+                candidate_status = "linked"
+            else:
+                candidate_status = previous["candidate_status"]
+                confirmed_at = previous["confirmed_at"]
+        connection.execute(
+            """
+            INSERT INTO storyboard_shot_asset_candidates (
+                storyboard_id, shot_id, candidate_type, candidate_name,
+                candidate_status, linked_entity_id, source, payload_json,
+                confirmed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, (strftime('%Y%m%d %H%M','now','localtime')), (strftime('%Y%m%d %H%M','now','localtime')))
+            ON CONFLICT(shot_id, candidate_type, candidate_name) DO UPDATE SET
+                storyboard_id=excluded.storyboard_id,
+                candidate_status=excluded.candidate_status,
+                linked_entity_id=excluded.linked_entity_id,
+                source=excluded.source,
+                payload_json=excluded.payload_json,
+                confirmed_at=excluded.confirmed_at,
+                updated_at=(strftime('%Y%m%d %H%M','now','localtime'))
+            """,
+            (
+                storyboard_id,
+                candidate["shot_id"],
+                candidate["candidate_type"],
+                candidate["candidate_name"],
+                candidate_status,
+                linked_entity_id,
+                candidate["source"],
+                json_dumps(candidate.get("payload") or {}),
+                confirmed_at,
+            ),
+        )
+    for key, candidate in existing.items():
+        if key in desired_keys:
+            continue
+        if not replace_storyboard and candidate["shot_id"] not in shot_ids:
+            continue
+        connection.execute(
+            "DELETE FROM storyboard_shot_asset_candidates WHERE candidate_id = ?",
+            (candidate["candidate_id"],),
+        )
+
+
+def extract_storyboard_shot_candidates(shot: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_candidate(
+        candidate_type: str,
+        candidate_name: str,
+        *,
+        linked_entity_id: str = "",
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        name = str(candidate_name or "").strip()
+        if not name:
+            return
+        key = (candidate_type, name)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append(
+            {
+                "storyboard_id": str(shot.get("storyboard_id") or ""),
+                "shot_id": str(shot.get("shot_id") or ""),
+                "candidate_type": candidate_type,
+                "candidate_name": name,
+                "linked_entity_id": str(linked_entity_id or ""),
+                "source": "storyboard",
+                "payload": {
+                    "shot_index": shot.get("shot_index"),
+                    "source_excerpt": shot.get("source_excerpt", ""),
+                    "scene_block_id": shot.get("scene_block_id", ""),
+                    **(payload or {}),
+                },
+            }
+        )
+
+    scene_name = str(shot.get("scene_name") or "").strip()
+    scene_id = str(shot.get("scene_id") or "").strip()
+    if scene_name or scene_id:
+        add_candidate(
+            "scene",
+            scene_name or scene_id,
+            linked_entity_id=scene_id,
+            payload={"scene_id": scene_id, "scene_name": scene_name},
+        )
+
+    subject_ids = normalize_json_list(shot.get("subject_ids"))
+    subject_names = normalize_json_list(shot.get("subject_names"))
+    for index, subject_name in enumerate(subject_names):
+        subject_id = subject_ids[index] if index < len(subject_ids) else ""
+        add_candidate(
+            "subject",
+            subject_name or subject_id,
+            linked_entity_id=subject_id,
+            payload={"subject_id": subject_id, "subject_name": subject_name},
+        )
+    if len(subject_ids) > len(subject_names):
+        for subject_id in subject_ids[len(subject_names) :]:
+            add_candidate("subject", subject_id, linked_entity_id=subject_id, payload={"subject_id": subject_id})
+
+    excluded_names = {scene_name, *subject_names}
+    for visual_element in normalize_json_list(shot.get("visual_elements")):
+        if visual_element in excluded_names:
+            continue
+        add_candidate("visual_element", visual_element, payload={"visual_element": visual_element})
+    return candidates
+
+
+def apply_candidate_link_to_storyboard_shot(
+    connection: sqlite3.Connection,
+    candidate: dict[str, Any],
+    linked_entity_id: str,
+) -> None:
+    candidate_type = candidate.get("candidate_type")
+    if candidate_type == "scene":
+        scene_row = connection.execute(
+            "SELECT canonical_name FROM visual_scenes WHERE scene_id = ?",
+            (linked_entity_id,),
+        ).fetchone()
+        scene_name = scene_row["canonical_name"] if scene_row else candidate["candidate_name"]
+        connection.execute(
+            """
+            UPDATE storyboard_shots
+            SET scene_id = ?,
+                scene_name = ?,
+                updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
+            WHERE storyboard_id = ? AND shot_id = ?
+            """,
+            (linked_entity_id, scene_name, candidate["storyboard_id"], candidate["shot_id"]),
+        )
+        return
+    if candidate_type != "subject":
+        return
+    row = connection.execute(
+        """
+        SELECT subject_ids_json, subject_names_json
+        FROM storyboard_shots
+        WHERE storyboard_id = ? AND shot_id = ?
+        """,
+        (candidate["storyboard_id"], candidate["shot_id"]),
+    ).fetchone()
+    if not row:
+        return
+    subject_row = connection.execute(
+        "SELECT canonical_name FROM visual_subjects WHERE subject_id = ?",
+        (linked_entity_id,),
+    ).fetchone()
+    subject_name = subject_row["canonical_name"] if subject_row else candidate["candidate_name"]
+    subject_ids = normalize_json_list(row["subject_ids_json"])
+    subject_names = normalize_json_list(row["subject_names_json"])
+    if linked_entity_id not in subject_ids:
+        subject_ids.append(linked_entity_id)
+    if subject_name not in subject_names:
+        subject_names.append(subject_name)
+    connection.execute(
+        """
+        UPDATE storyboard_shots
+        SET subject_ids_json = ?,
+            subject_names_json = ?,
+            updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
+        WHERE storyboard_id = ? AND shot_id = ?
+        """,
+        (json_dumps(subject_ids), json_dumps(subject_names), candidate["storyboard_id"], candidate["shot_id"]),
+    )
+
+
+def count_reference_assets(reference_assets: dict[str, Any]) -> int:
+    anchors = (reference_assets.get("subject_anchors") or []) + (reference_assets.get("scene_anchors") or [])
+    return len([anchor for anchor in anchors if isinstance(anchor, dict)])
+
+
+def count_missing_reference_assets(reference_assets: dict[str, Any]) -> int:
+    anchors = (reference_assets.get("subject_anchors") or []) + (reference_assets.get("scene_anchors") or [])
+    return len([anchor for anchor in anchors if isinstance(anchor, dict) and not anchor.get("asset_url")])
 
 
 def refresh_storyboard_totals(connection: sqlite3.Connection, storyboard_id: str) -> None:
@@ -2314,7 +2934,7 @@ def refresh_storyboard_totals(connection: sqlite3.Connection, storyboard_id: str
         SET shot_count = ?,
             actual_duration_sec = ?,
             status = CASE WHEN status = 'failed' THEN status ELSE ? END,
-            updated_at = CURRENT_TIMESTAMP
+            updated_at = (strftime('%Y%m%d %H%M','now','localtime'))
         WHERE storyboard_id = ?
         """,
         (
@@ -3214,7 +3834,7 @@ def backfill_visual_scene_phases(connection: sqlite3.Connection) -> None:
 
 
 def current_timestamp() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    return datetime.now().strftime("%Y%m%d %H%M")
 
 
 def preview_text(value: str, *, limit: int = 80) -> str:
