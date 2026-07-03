@@ -10,13 +10,22 @@ from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, abort, jsonify, render_template, request, send_file, send_from_directory
+from pypdf import PdfReader
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 from drama_agents.chapter_refiner import ChapterRefiner, result_to_payload as refinement_result_to_payload
 from drama_agents.map_api import REGIONS, clamp_int, ensure_default_data, parse_bbox, parse_bool, region_label, render_map
-from drama_agents.material_splitter import MaterialSplitter, SUPPORTED_MATERIAL_EXTENSIONS, slugify
-from drama_agents.script_agent import ScriptAgent, render_script_markdown
+from drama_agents.material_splitter import (
+    MaterialSplitter,
+    SUPPORTED_MATERIAL_EXTENSIONS,
+    docx_to_sections,
+    extract_page_text,
+    extract_text_with_textutil,
+    normalize_text_body,
+    slugify,
+)
+from drama_agents.script_agent import ScriptAgent, parse_manual_storyboard_script, render_script_markdown, text_hash
 from drama_agents.script_assistant import ScriptAssistantController
 from drama_agents.storage import MaterialDatabase, current_timestamp, group_visual_scenes
 from drama_agents.storyboard_agent import StoryboardAgent
@@ -30,6 +39,7 @@ from drama_agents.visual_subject_agent import VisualSubjectAgent
 
 
 ALLOWED_UPLOADS = SUPPORTED_MATERIAL_EXTENSIONS
+STORYBOARD_SCRIPT_UPLOAD_EXTENSIONS = {".txt", ".md", ".markdown", ".pdf", ".doc", ".docx"}
 ENV_PROVIDER = object()
 
 
@@ -597,6 +607,49 @@ def create_app(
             return jsonify({"error": str(exc)}), 500
         return jsonify({"generation": updated, "storyboard_script": updated.get("script", {}).get("storyboard_script") or storyboard_script})
 
+    @app.route("/api/script/generations/<generation_id>/storyboard-script/upload", methods=["POST"])
+    def upload_storyboard_script(generation_id: str):
+        database = MaterialDatabase(database_path)
+        if not database.find_script_generation(generation_id):
+            abort(404)
+        upload = request.files.get("file")
+        if not upload or not upload.filename:
+            return jsonify({"error": "请选择要上传的分镜剧本文件"}), 400
+        filename = secure_filename(upload.filename) or "storyboard-script.txt"
+        suffix = Path(filename).suffix.lower()
+        if suffix not in STORYBOARD_SCRIPT_UPLOAD_EXTENSIONS:
+            return jsonify({"error": "暂只支持 TXT / Markdown / PDF / Word(doc/docx)"}), 400
+        upload_dir = upload_path / "storyboard_scripts"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        destination = unique_path(upload_dir / filename)
+        upload.save(destination)
+        try:
+            text = extract_storyboard_upload_text(destination)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"filename": filename, "text": text})
+
+    @app.route("/api/script/generations/<generation_id>/storyboard-script/parse", methods=["POST"])
+    def parse_storyboard_script(generation_id: str):
+        database = MaterialDatabase(database_path)
+        generation = database.find_script_generation(generation_id)
+        if not generation:
+            abort(404)
+        payload = request.get_json(silent=True) or {}
+        raw_text = str(payload.get("raw_text") or "").strip()
+        script = generation.get("script") if isinstance(generation.get("script"), dict) else {}
+        try:
+            storyboard_script = parse_manual_storyboard_script(
+                raw_text,
+                title=str(script.get("title") or generation.get("topic") or "手动分镜剧本"),
+            )
+            storyboard_script["source_title"] = str(script.get("title") or generation.get("topic") or "")
+            storyboard_script["source_article_hash"] = text_hash(str(script.get("article") or ""))
+            updated = database.update_script_storyboard_script(generation_id, storyboard_script)
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        return jsonify({"generation": updated, "storyboard_script": updated.get("script", {}).get("storyboard_script") or storyboard_script})
+
     @app.route("/api/script/generations/<generation_id>/storyboard/generate", methods=["POST"])
     def generate_storyboard_from_script(generation_id: str):
         payload = request.get_json(silent=True) or {}
@@ -931,16 +984,17 @@ def create_app(
 
     @app.route("/script-generations/<generation_id>/<section>", methods=["GET"])
     def script_generation_view(generation_id: str, section: str):
-        if section != "script":
+        if section not in {"script", "storyboard-script"}:
             abort(404)
         generation = MaterialDatabase(database_path).find_script_generation(generation_id)
         if not generation:
             abort(404)
+        section_title = "分镜剧本阅读器" if section == "storyboard-script" else "剧本阅读器"
         return render_template(
             "script_generation_view.html",
             generation=generation,
             section=section,
-            section_title="剧本阅读器",
+            section_title=section_title,
         )
 
     @app.route("/storyboards/<storyboard_id>", methods=["GET"])
@@ -1554,6 +1608,38 @@ def resolve_workspace_path(root: Path, relative_path: str) -> Path:
     if root != target and root not in target.parents:
         raise ValueError("路径越界")
     return target
+
+
+def extract_storyboard_upload_text(source: Path) -> str:
+    suffix = source.suffix.lower()
+    if suffix in {".txt", ".md", ".markdown"}:
+        text = read_text_upload(source)
+    elif suffix == ".docx":
+        sections = docx_to_sections(source)
+        text = "\n\n".join(section_text for _, section_text in sections)
+    elif suffix == ".doc":
+        text = extract_text_with_textutil(source)
+    elif suffix == ".pdf":
+        reader = PdfReader(str(source))
+        if not reader.pages:
+            raise ValueError("PDF 没有可读取的页面")
+        text = extract_page_text(reader, 1, len(reader.pages))
+    else:
+        raise ValueError("暂只支持 TXT / Markdown / PDF / Word(doc/docx)")
+    text = normalize_text_body(text)
+    if not text:
+        raise ValueError("没有从文件中读取到文字内容，请换成可复制文本的文件")
+    return text
+
+
+def read_text_upload(source: Path) -> str:
+    raw = source.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="ignore")
 
 
 def unique_path(path: Path) -> Path:

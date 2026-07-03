@@ -5,6 +5,8 @@ import sqlite3
 
 from pypdf import PdfWriter
 
+from tests.test_material_splitter import create_minimal_docx
+
 from drama_agents.storage import MaterialDatabase
 from drama_agents.storyboard_agent import RuleBasedStoryboardProvider
 from drama_agents.vector_store import LocalVectorStore
@@ -899,11 +901,11 @@ def test_script_generation_dedicated_view_pages_render_saved_sections(tmp_path):
     ]
     assert "剧本阅读器" in script_html
     assert 'data-script-reader="' in script_html
-    assert "剧本改造" in tabs_html
     assert "分镜剧本" in tabs_html
-    assert 'data-storyboard-script-link aria-disabled="true"' in tabs_html
-    assert "data-script-adapt" in tabs_html
-    assert "script-storyboard-panel" in script_html
+    assert f'href="/script-generations/{generation_id}/storyboard-script"' in tabs_html
+    assert 'data-storyboard-script-link aria-disabled="false"' in tabs_html
+    assert "data-script-adapt" not in tabs_html
+    assert "script-storyboard-panel" not in script_html
     assert "编辑" in script_html
     assert "保存" in script_html
     assert ">主体</a>" not in tabs_html
@@ -962,11 +964,129 @@ def test_script_adaptation_generates_storyboard_script_and_updates_reader(tmp_pa
 
     html = client.get(f"/script-generations/{generation['generation_id']}/script").get_data(as_text=True)
     tabs_html = html[html.index('<nav class="script-page-tabs"') : html.index("</nav>", html.index('<nav class="script-page-tabs"'))]
-    assert "再次改造" in html
-    assert "再次改造" in tabs_html
     assert 'data-storyboard-script-link aria-disabled="false"' in tabs_html
-    assert "分镜剧本旁白第一段" in html
-    assert "开场钩子" in html
+    assert f'href="/script-generations/{generation["generation_id"]}/storyboard-script"' in tabs_html
+    assert "data-script-adapt" not in tabs_html
+    assert "分镜剧本旁白第一段" not in html
+    assert "开场钩子" not in html
+
+    storyboard_html = client.get(f"/script-generations/{generation['generation_id']}/storyboard-script").get_data(as_text=True)
+    storyboard_tabs_html = storyboard_html[
+        storyboard_html.index('<nav class="script-page-tabs"') : storyboard_html.index("</nav>", storyboard_html.index('<nav class="script-page-tabs"'))
+    ]
+    assert "分镜剧本阅读器" in storyboard_html
+    assert '<a class="active" data-storyboard-script-link' in storyboard_tabs_html
+    assert "分镜剧本旁白第一段" not in storyboard_html
+    assert "开场钩子" not in storyboard_html
+    assert "暂未解析" in storyboard_html
+
+
+def test_storyboard_script_page_parses_manual_input(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    generation_id = generation["generation_id"]
+
+    storyboard_page = client.get(f"/script-generations/{generation_id}/storyboard-script")
+    assert storyboard_page.status_code == 200
+    storyboard_html = storyboard_page.get_data(as_text=True)
+    assert "粘贴分镜剧本" not in storyboard_html
+    assert "粘贴 S01" not in storyboard_html
+    assert "data-storyboard-manual-input placeholder=" not in storyboard_html
+    assert "script-storyboard-dropbox" in storyboard_html
+    assert "script-storyboard-output" in storyboard_html
+    assert "data-storyboard-manual-input" in storyboard_html
+    assert "data-storyboard-upload" in storyboard_html
+    assert "data-storyboard-parse" in storyboard_html
+    assert "暂未解析" in storyboard_html
+    assert "尚未解析分镜剧本" not in storyboard_html
+    assert "分镜剧本旁白第一段" not in storyboard_html
+
+    raw_text = """
+S01｜开场：地球上最会讲故事的动物
+
+场景类型： HOST_OPENING + SYMBOLIC_MONTAGE
+功能： 开场钩子 / 提出核心问题
+时长： 25 秒
+源稿： [1]
+
+讲述人旁白
+
+早在 7 万年前，非洲东部的稀树草原上，生活着一群看起来很不起眼的动物。
+
+画面演绎
+
+地球从太空中缓慢旋转，镜头推进到非洲大陆。
+
+屏幕文字
+7 万年前
+非洲东部
+
+历史人物对白
+
+无。
+
+保留支撑点
+智人一开始并不强。
+""".strip()
+    response = client.post(f"/api/script/generations/{generation_id}/storyboard-script/parse", json={"raw_text": raw_text})
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["storyboard_script"]["scene_script"][0]["scene_id"] == "S01"
+    assert payload["storyboard_script"]["adapted_article"].startswith("S01｜开场")
+
+    updated_html = client.get(f"/script-generations/{generation_id}/storyboard-script").get_data(as_text=True)
+    assert "S01｜开场：地球上最会讲故事的动物" in updated_html
+    assert "讲述人旁白" in updated_html
+    assert "画面演绎" in updated_html
+    assert "智人一开始并不强。" in updated_html
+
+
+def test_storyboard_script_upload_extracts_text_files(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+
+    txt_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/storyboard-script/upload",
+        data={"file": (BytesIO("S01｜开场\n\n讲述人旁白\n测试文本".encode("utf-8")), "storyboard.txt")},
+        content_type="multipart/form-data",
+    )
+
+    assert txt_response.status_code == 200
+    txt_payload = txt_response.get_json()
+    assert txt_payload["filename"] == "storyboard.txt"
+    assert "测试文本" in txt_payload["text"]
+
+    docx_path = tmp_path / "storyboard.docx"
+    create_minimal_docx(docx_path)
+    docx_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/storyboard-script/upload",
+        data={"file": (BytesIO(docx_path.read_bytes()), "storyboard.docx")},
+        content_type="multipart/form-data",
+    )
+
+    assert docx_response.status_code == 200
+    assert "这里是 Word 第一章正文。" in docx_response.get_json()["text"]
 
 
 def test_storyboard_generation_uses_adapted_storyboard_script(tmp_path):
@@ -3332,6 +3452,10 @@ def test_script_reader_uses_chinese_article_typography():
     workspace_rule = styles[styles.index(".script-reader-workspace {") : styles.index(".script-editor-toolbar")]
     main_rule = styles[styles.index(".script-reader-main {") : styles.index(".script-editor-toolbar")]
     toolbar_rule = styles[styles.index(".script-editor-toolbar {") : styles.index(".script-editor-toolbar h3")]
+    storyboard_import_rule = styles[styles.index(".script-storyboard-import {") : styles.index(".script-storyboard-dropbox")]
+    storyboard_dropbox_rule = styles[styles.index(".script-storyboard-dropbox {") : styles.index(".script-storyboard-input")]
+    storyboard_input_rule = styles[styles.index(".script-storyboard-input {") : styles.index(".script-storyboard-input:focus")]
+    storyboard_output_rule = styles[styles.index(".script-storyboard-output {") : styles.index(".script-storyboard-output .script-editor-toolbar")]
 
     assert "text-indent: 2em;" in article_rule
     assert "margin: 0;" in article_rule
@@ -3340,12 +3464,22 @@ def test_script_reader_uses_chinese_article_typography():
     assert "[hidden]" in styles
     assert "display: none !important;" in styles
     assert "width: min(100vw - 64px, 1420px);" in page_shell_rule
-    assert "grid-template-columns: minmax(0, 1fr) minmax(360px, 0.86fr);" in workspace_rule
+    assert "grid-template-columns: minmax(0, 1fr);" in workspace_rule
     assert "height: auto;" in workspace_rule
     assert "overflow: visible;" in workspace_rule
-    assert ".script-storyboard-panel" in styles
-    assert "data-script-adapt" in template
+    assert "script-storyboard-panel" not in template
+    assert "data-script-adapt" not in template
     assert "data-storyboard-script-link" in template
+    assert "data-storyboard-parse" in template
+    assert "data-storyboard-parse" in reader_script
+    assert "width: 100%;" in storyboard_import_rule
+    assert "width: 100%;" in storyboard_output_rule
+    assert "1120px" not in storyboard_import_rule
+    assert "1120px" not in storyboard_output_rule
+    assert "min-height: 420px;" in storyboard_dropbox_rule
+    assert "min-height: 420px;" in storyboard_input_rule
+    assert "min-height: 620px;" not in storyboard_dropbox_rule
+    assert "min-height: 620px;" not in storyboard_input_rule
     assert "max-width: 100%;" in article_card_rule
     assert "max-width: 100%;" in toolbar_rule
     assert "height: auto;" in main_rule

@@ -165,12 +165,17 @@ class ScriptAgent:
     def adapt_for_storyboard(self, *, generation: dict[str, Any]) -> dict[str, Any]:
         if not self.provider:
             raise RuntimeError("未配置 DEEPSEEK_API_KEY，无法改造分镜剧本。")
-        if not hasattr(self.provider, "adapt_script_for_storyboard"):
+        supports_multistage = all(
+            hasattr(self.provider, method_name)
+            for method_name in ("extract_content_atoms", "plan_narrator_scenes", "write_narrator_scene_batch")
+        )
+        if not hasattr(self.provider, "adapt_script_for_storyboard") and not supports_multistage:
             raise RuntimeError("当前剧本 provider 不支持剧本改造。")
         script = generation.get("script") if isinstance(generation.get("script"), dict) else {}
         article = str(script.get("article") or "").strip()
         if not article:
             raise ValueError("当前剧本没有完整正文，无法改造为分镜剧本。")
+        title = str(script.get("title") or generation.get("topic") or "")
         payload = {
             "topic": generation.get("topic", ""),
             "time_range": generation.get("time_range", ""),
@@ -178,10 +183,68 @@ class ScriptAgent:
             "article": article,
             "matched_events": generation.get("matched_events") or [],
         }
-        adapted = normalize_storyboard_script_payload(self.provider.adapt_script_for_storyboard(payload), fallback_article=article)
+        if supports_multistage:
+            content_atoms_payload = normalize_content_atoms_payload(
+                self.provider.extract_content_atoms({**payload, "title": title}),
+                fallback_article=article,
+            )
+            scene_plan_payload = normalize_scene_plan_payload(
+                self.provider.plan_narrator_scenes({**payload, **content_atoms_payload, "title": title})
+            )
+            scene_script = []
+            for scene_plan_batch in chunk_items(scene_plan_payload["scene_plan"], adaptation_batch_size()):
+                batch_payload = {
+                    **payload,
+                    **content_atoms_payload,
+                    "title": title,
+                    "episode_structure": scene_plan_payload["episode_structure"],
+                    "scene_plan": scene_plan_batch,
+                    "full_scene_plan": scene_plan_payload["scene_plan"],
+                }
+                batch_result = self.provider.write_narrator_scene_batch(batch_payload)
+                if isinstance(batch_result, dict):
+                    scene_script.extend(normalize_scene_script(batch_result.get("scene_script")))
+            raw_adapted = {
+                "title": f"{title or '分场脚本'} - 分镜前脚本",
+                "format": "narrator_led_science_comic",
+                "episode_structure": scene_plan_payload["episode_structure"],
+                "scene_plan": scene_plan_payload["scene_plan"],
+                "scene_script": scene_script,
+                "content_atoms": content_atoms_payload["content_atoms"],
+                "causal_chain": content_atoms_payload["causal_chain"],
+                "retention_requirements": content_atoms_payload["retention_requirements"],
+                "adaptation_notes": ["按 content_atoms → scene_plan → scene_script 多阶段生成。"],
+            }
+        else:
+            raw_adapted = self.provider.adapt_script_for_storyboard(payload)
+            content_atoms_payload = normalize_content_atoms_payload(raw_adapted, fallback_article=article)
+        adapted = normalize_narrator_scene_script_payload(raw_adapted, fallback_article=article)
+        if not adapted.get("content_atoms") and content_atoms_payload.get("content_atoms"):
+            adapted["content_atoms"] = content_atoms_payload["content_atoms"]
+            adapted["causal_chain"] = content_atoms_payload["causal_chain"]
+            adapted["retention_requirements"] = content_atoms_payload["retention_requirements"]
+            adapted["retention_review"] = validate_content_retention(content_atoms_payload, adapted.get("scene_script") or [])
+        if (
+            supports_multistage
+            and hasattr(self.provider, "repair_narrator_scene_script")
+            and should_repair_content_retention(adapted.get("retention_review") or {})
+        ):
+            repair_payload = self.provider.repair_narrator_scene_script(
+                {
+                    **payload,
+                    "title": title,
+                    "original_payload": adapted,
+                    "content_atoms": adapted.get("content_atoms") or [],
+                    "causal_chain": adapted.get("causal_chain") or [],
+                    "scene_plan": adapted.get("scene_plan") or [],
+                    "retention_review": adapted.get("retention_review") or {},
+                    "missing_must_keep_atoms": (adapted.get("retention_review") or {}).get("missing_must_keep_atoms") or [],
+                }
+            )
+            adapted = merge_repaired_scenes(adapted, repair_payload)
         adapted["created_at"] = current_timestamp()
         adapted["source_article_hash"] = text_hash(article)
-        adapted["source_title"] = str(script.get("title") or generation.get("topic") or "")
+        adapted["source_title"] = title
         return adapted
 
 
@@ -199,8 +262,23 @@ class DeepSeekScriptProvider:
             or os.environ.get("DEEPSEEK_SCRIPT_MODEL")
             or os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
         )
+        self.adaptation_model = (
+            os.environ.get("DEEPSEEK_ADAPTATION_MODEL")
+            or os.environ.get("DEEPSEEK_SCRIPT_MODEL")
+            or os.environ.get("DEEPSEEK_MODEL")
+            or "deepseek-v4-pro"
+        )
         self.base_url = base_url
         self.timeout = timeout or int(os.environ.get("DEEPSEEK_TIMEOUT", "240"))
+
+    def get_adaptation_model(self) -> str:
+        return (
+            os.environ.get("DEEPSEEK_ADAPTATION_MODEL")
+            or os.environ.get("DEEPSEEK_SCRIPT_MODEL")
+            or os.environ.get("DEEPSEEK_MODEL")
+            or self.adaptation_model
+            or "deepseek-v4-pro"
+        )
 
     def generate_script(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._complete_json(
@@ -259,26 +337,106 @@ class DeepSeekScriptProvider:
             max_tokens=int(os.environ.get("SCRIPT_EDIT_MAX_TOKENS", "3600")),
         )
 
-    def adapt_script_for_storyboard(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def extract_content_atoms(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._complete_json(
             system=(
-                "你是有 30 年纪录片、动画科普和短剧导演经验的分镜剧本改造 Agent。"
-                "你负责把文章式历史科普旁白改造成可直接进入卡通科普短剧分镜的生产脚本。"
-                "只输出合法 JSON。"
+                "你是内容保真分析 Agent，只负责从原文中提取不可丢失的内容原子和推理链。"
+                "你不是摘要器，不要生成短稿。只输出合法 json object。"
             ),
-            prompt=build_storyboard_script_adaptation_prompt(payload),
-            temperature=0.35,
-            max_tokens=int(os.environ.get("SCRIPT_ADAPTATION_MAX_TOKENS", "12000")),
+            prompt=build_content_atoms_extraction_prompt(payload),
+            temperature=0.1,
+            max_tokens=int(os.environ.get("SCRIPT_ATOMS_MAX_TOKENS", "20000")),
+            model=self.get_adaptation_model(),
         )
 
-    def _complete_json(self, *, system: str, prompt: str, temperature: float, max_tokens: int) -> dict[str, Any]:
+    def plan_narrator_scenes(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._complete_json(
+            system=(
+                "你是讲述人驱动科普漫剧的分场规划 Agent。"
+                "只规划 scene_plan，不写最终旁白。只输出合法 json object。"
+            ),
+            prompt=build_narrator_scene_plan_prompt(payload),
+            temperature=0.2,
+            max_tokens=int(os.environ.get("SCRIPT_SCENE_PLAN_MAX_TOKENS", "16000")),
+            model=self.get_adaptation_model(),
+        )
+
+    def write_narrator_scene_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._complete_json(
+            system=(
+                "你是有 30 年纪录片、动画科普和短剧导演经验的分场脚本改造 Agent。"
+                "你负责按 scene_plan 分批写讲述人驱动的 AI 科普漫剧分场。只输出合法 json object。"
+            ),
+            prompt=build_narrator_scene_batch_prompt(payload),
+            temperature=0.35,
+            max_tokens=int(os.environ.get("SCRIPT_SCENE_BATCH_MAX_TOKENS", "24000")),
+            model=self.get_adaptation_model(),
+        )
+
+    def repair_narrator_scene_script(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._complete_json(
+            system=(
+                "你是分场脚本内容保真修复 Agent。"
+                "你只补漏，不重写全片。只输出合法 json object。"
+            ),
+            prompt=build_repair_missing_atoms_prompt(payload),
+            temperature=0.2,
+            max_tokens=int(os.environ.get("SCRIPT_ADAPTATION_REPAIR_MAX_TOKENS", "16000")),
+            model=self.get_adaptation_model(),
+        )
+
+    def adapt_script_for_storyboard(self, payload: dict[str, Any]) -> dict[str, Any]:
+        script = payload.get("script") if isinstance(payload.get("script"), dict) else {}
+        article = str(payload.get("article") or script.get("article") or "").strip()
+        title = str(script.get("title") or payload.get("topic") or "")
+        content_atoms_payload = normalize_content_atoms_payload(
+            self.extract_content_atoms({**payload, "article": article, "title": title}),
+            fallback_article=article,
+        )
+        scene_plan_payload = normalize_scene_plan_payload(
+            self.plan_narrator_scenes({**payload, **content_atoms_payload, "article": article, "title": title})
+        )
+        scene_script = []
+        for batch in chunk_items(scene_plan_payload["scene_plan"], adaptation_batch_size()):
+            batch_payload = {
+                **payload,
+                **content_atoms_payload,
+                "article": article,
+                "title": title,
+                "episode_structure": scene_plan_payload["episode_structure"],
+                "scene_plan": batch,
+            }
+            scene_script.extend(normalize_scene_script(self.write_narrator_scene_batch(batch_payload).get("scene_script")))
+        return {
+            "title": f"{title or '分场脚本'} - 分镜前脚本",
+            "format": "narrator_led_science_comic",
+            "episode_structure": scene_plan_payload["episode_structure"],
+            "scene_plan": scene_plan_payload["scene_plan"],
+            "scene_script": scene_script,
+            "content_atoms": content_atoms_payload["content_atoms"],
+            "causal_chain": content_atoms_payload["causal_chain"],
+            "retention_requirements": content_atoms_payload["retention_requirements"],
+        }
+
+    def _complete_json(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         try:
-            return self._complete_json_once(
-                system=system,
-                prompt=prompt,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            call_args = {
+                "system": system,
+                "prompt": prompt,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+            if model is not None:
+                call_args["model"] = model
+            return self._complete_json_once(**call_args)
         except json.JSONDecodeError as exc:
             repair_prompt = (
                 f"{prompt}\n\n"
@@ -290,20 +448,31 @@ class DeepSeekScriptProvider:
                 "不要尾随逗号，不要截断字符串，不要省略闭合引号或闭合大括号。"
             )
             try:
-                return self._complete_json_once(
-                    system=system,
-                    prompt=repair_prompt,
-                    temperature=min(temperature, 0.2),
-                    max_tokens=max_tokens,
-                )
+                repair_call_args = {
+                    "system": system,
+                    "prompt": repair_prompt,
+                    "temperature": min(temperature, 0.2),
+                    "max_tokens": max_tokens,
+                }
+                if model is not None:
+                    repair_call_args["model"] = model
+                return self._complete_json_once(**repair_call_args)
             except json.JSONDecodeError as repair_exc:
                 detail = getattr(self, "_last_parse_error_detail", "")
                 suffix = f"；返回预览：{detail}" if detail else ""
                 raise RuntimeError(f"DeepSeek 返回的 JSON 仍无法解析：{repair_exc}{suffix}") from repair_exc
 
-    def _complete_json_once(self, *, system: str, prompt: str, temperature: float, max_tokens: int) -> dict[str, Any]:
+    def _complete_json_once(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        temperature: float,
+        max_tokens: int,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         body = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": prompt},
@@ -448,6 +617,25 @@ def response_preview(content: str, *, finish_reason: Any = None, model: Any = No
         compact = "<空内容>"
     parts = [f"finish_reason={finish_reason}", f"model={model}", f"content={compact}"]
     return "；".join(parts)
+
+
+def adaptation_batch_size() -> int:
+    return max(1, normalize_int(os.environ.get("SCRIPT_SCENE_BATCH_SIZE"), default=6))
+
+
+def chunk_items(items: list[Any], size: int) -> list[list[Any]]:
+    if size <= 0:
+        size = 1
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def should_repair_content_retention(review: dict[str, Any]) -> bool:
+    if not isinstance(review, dict):
+        return False
+    if review.get("missing_must_keep_atoms"):
+        return True
+    coverage_ratio = normalize_ratio(review.get("coverage_ratio"), default=1.0)
+    return coverage_ratio < 0.92
 
 
 def text_hash(value: str) -> str:
@@ -611,38 +799,94 @@ def build_storyboard_script_adaptation_prompt(payload: dict[str, Any]) -> str:
     return (
         "你是拥有 30 年纪录片、动画科普、短剧导演和总编剧经验的剧本改造 Agent。\n"
         "你的任务不是再写一篇更华丽的文章，而是把“内容正确的文章式旁白稿”改造成"
-        "“可直接交给卡通科普短剧分镜 Agent 的生产脚本”。\n\n"
+        "“讲述人驱动的 AI 科普漫剧分场脚本”。这不是传统人物漫剧。\n\n"
+        "核心定位：\n"
+        "- 这是讲述人驱动的 AI 科普漫剧，不是传统人物漫剧。\n"
+        "- 固定讲述人可以是虚拟科普老师、旁白声音、字幕讲述人或虚拟主持人。\n"
+        "- 讲述人负责提出问题、解释知识、做类比、吐槽、总结因果、转场和回扣主题。\n"
+        "- 历史人物、早期人类、动物、部落成员、尼安德特人等只负责画面演绎。\n"
+        "- 所有解释性、知识性、因果性、总结性、吐槽性内容必须放在 narrator_lines。\n"
+        "- historical_character_dialogue 只能少量出现，只能是生活化短句，历史人物不能承担知识解释。\n\n"
         "硬性边界：\n"
         "1. 不新增未经 fact_cards、causal_chain、outline 或原 article 支持的史实。\n"
         "2. 不输出主体锚点、场景锚点、图片 prompt、分镜镜头表或 keyframe prompt。\n"
         "3. 可以重排、合并、拆分和润色旁白，让它更适合视听表达，但必须保留事实链条。\n"
-        "4. 删除或合并只重复观点、没有新剧情推动的句子。\n"
-        "5. 每个段落都必须服务一种剧情功能：开场钩子、冲突建立、身份揭示、机制解释、过程展示、地图转场、反差/纠错、主题回扣。\n"
-        "6. 适合历史科普卡通短剧：普通段落优先地图、地貌、群体剪影、图解、字幕、箭头、轻运动；关键段落才需要强漫画构图。\n\n"
+        "4. 不要按原文自然段机械切场。切场依据是视听表达任务，不是原文段落。\n"
+        "5. 时间变化、地点变化、知识任务变化、视觉形式变化、情绪功能变化时必须考虑切场。\n"
+        "6. 每个场景只完成一个知识任务或情绪任务，不要把多个机制塞进同一场。\n"
+        "7. 每个场景必须包含 scene_type、narrator_lines、visual_layer、screen_text、fact_boundary。\n"
+        "8. 历史人物不能承担知识解释，不能让古人说出现代知识、学术判断、宏观总结。\n"
+        "9. 适合历史科普卡通短剧：普通场景优先地图、地貌、群体剪影、图解、字幕、箭头、轻运动；关键场景才需要强漫画构图。\n\n"
+        "场景类型只能从以下类型中选择，可用 + 组合：\n"
+        "- HOST_OPENING\n"
+        "- HOST_EXPLANATION\n"
+        "- MAP_ANIMATION\n"
+        "- TIMELINE_CARD\n"
+        "- HISTORICAL_REENACTMENT\n"
+        "- INFOGRAPHIC\n"
+        "- SYMBOLIC_MONTAGE\n"
+        "- COMPARISON_SPLIT_SCREEN\n"
+        "- TRANSITION_CARD\n"
+        "- THEME_CALLBACK\n\n"
         "输出要求：只输出严格 JSON object，格式如下：\n"
         "{\n"
-        '  "title": "分镜剧本标题",\n'
-        '  "adapted_article": "改造后的完整旁白稿，按自然段用 \\n\\n 分隔",\n'
-        '  "adapted_segments": [\n'
+        '  "title": "分场脚本标题",\n'
+        '  "format": "narrator_led_science_comic",\n'
+        '  "narrator_profile": {\n'
+        '    "role": "虚拟科普老师 / 旁白 / 字幕讲述人",\n'
+        '    "tone": "幽默、清楚、有纪录片感",\n'
+        '    "visual_presence": "avatar | voice_only | subtitle_only | mixed"\n'
+        "  },\n"
+        '  "episode_structure": {\n'
+        '    "main_question": "这集要回答的核心问题",\n'
+        '    "core_thesis": "观众看完后要记住的核心观点",\n'
+        '    "target_duration_min": 8,\n'
+        '    "estimated_scene_count": 16\n'
+        "  },\n"
+        '  "scene_script": [\n'
         "    {\n"
-        '      "segment_id": "seg-001",\n'
-        '      "voiceover": "这一段最终旁白",\n'
-        '      "dramatic_function": "开场钩子/冲突建立/身份揭示/机制解释/地图转场/主题回扣",\n'
-        '      "visual_goal": "这一段画面要完成什么",\n'
-        '      "visual_progression": "相对上一段推进了什么，必须避免重复画面",\n'
-        '      "scene_intent": "地图/群像/图解/主体动作/道具特写/转场/蒙太奇",\n'
-        '      "continuity_hint": "和上一段或下一段如何衔接",\n'
-        '      "fact_boundary": "史实明确支持/合理场景化/需人工核对"\n'
+        '      "scene_id": "S01",\n'
+        '      "scene_title": "场景标题",\n'
+        '      "scene_type": "HOST_OPENING + MAP_ANIMATION",\n'
+        '      "duration_sec": 20,\n'
+        '      "beat_function": "开场钩子 / 问题提出 / 困境建立 / 机制解释 / 历史转折 / 结果展示 / 代价揭示 / 主题回扣",\n'
+        '      "knowledge_point": "这一场只讲一个核心知识点",\n'
+        '      "narrator_lines": ["讲述人台词 1", "讲述人台词 2"],\n'
+        '      "visual_layer": {\n'
+        '        "main_visual": "画面主内容",\n'
+        '        "character_action": "历史人物或群体在画面中做什么；没有就写无",\n'
+        '        "environment": "时间、地点、环境氛围",\n'
+        '        "camera": "镜头组织方式",\n'
+        '        "animation_logic": "地图、箭头、字幕、图解、符号如何动起来",\n'
+        '        "transition": "如何进入下一场"\n'
+        "      },\n"
+        '      "screen_text": ["屏幕关键词 1", "屏幕关键词 2"],\n'
+        '      "historical_character_dialogue": [\n'
+        "        {\n"
+        '          "speaker": "角色名",\n'
+        '          "line": "极短生活化台词",\n'
+        '          "purpose": "气氛/幽默/情绪",\n'
+        '          "evidence_level": "合理场景化"\n'
+        "        }\n"
+        "      ],\n"
+        '      "audio_hint": "旁白、环境音、音乐或音效建议",\n'
+        '      "fact_boundary": "史实明确支持 | 合理场景化 | 需人工核对",\n'
+        '      "source_trace": ["来自原文第几段、outline 或 fact_card"],\n'
+        '      "next_scene_hook": "一句话说明如何衔接下一场"\n'
         "    }\n"
         "  ],\n"
+        '  "adapted_article": "兼容旧 UI，可省略；系统会从 narrator_lines 自动生成",\n'
+        '  "adapted_segments": [],\n'
         '  "adaptation_notes": ["你做了哪些生产化改造"],\n'
-        '  "review_notes": ["仍需人工注意的问题"]\n'
+        '  "review_notes": ["仍需人工注意的问题"],\n'
+        '  "scene_review": {}\n'
         "}\n\n"
-        "分段要求：\n"
-        "- adapted_segments 必须覆盖 adapted_article 的主要内容。\n"
-        "- 每个 segment 通常 1-3 句旁白，不要把整篇文章塞成一个 segment。\n"
-        "- visual_progression 必须说清楚与上一段相比画面/剧情推进了什么。\n"
-        "- 如果连续两段会生成几乎一样的画面，必须合并或改写其中一段。\n\n"
+        "分场要求：\n"
+        "- 不要按原文自然段机械切场；scene_script 是视听表达单元，不是文章段落列表。\n"
+        "- 每个 scene 的 narrator_lines 通常 1-4 句；超过 4 句通常说明没有真正分场。\n"
+        "- historical_character_dialogue 是点缀，不是讲课；总量必须远少于讲述人台词。\n"
+        "- screen_text 只放屏幕关键词、概念词、时间地点或转场卡，不要塞成长句。\n"
+        "- source_trace 要帮助人工知道这一场来自原文、outline、causal_chain 或 fact_card 的哪部分。\n\n"
         f"输入剧本：\n{json.dumps(source, ensure_ascii=False, indent=2)}"
     ).strip()
 
@@ -1176,23 +1420,1433 @@ def normalize_script_payload(payload: dict[str, Any], topic: str) -> dict[str, A
     }
 
 
-def normalize_storyboard_script_payload(payload: dict[str, Any], *, fallback_article: str) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError("剧本改造 Agent 返回不是 JSON object")
-    segments = normalize_adapted_segments(payload.get("adapted_segments"))
-    adapted_article = str(payload.get("adapted_article") or "").strip()
-    if not adapted_article and segments:
-        adapted_article = "\n\n".join(segment["voiceover"] for segment in segments if segment.get("voiceover")).strip()
-    if not adapted_article:
-        adapted_article = fallback_article
+ATOM_TYPES = {
+    "fact",
+    "number",
+    "comparison",
+    "cause_effect",
+    "mechanism",
+    "analogy",
+    "example",
+    "transition",
+    "claim",
+    "consequence",
+    "visual_hook",
+}
+
+REASONING_ROLES = {
+    "premise",
+    "evidence",
+    "mechanism",
+    "consequence",
+    "contrast",
+    "turning_point",
+    "audience_hook",
+    "conclusion",
+}
+
+DETAIL_LOSS_ATOM_TYPES = {"comparison", "number", "cause_effect", "mechanism", "analogy", "example", "transition", "consequence"}
+
+DEFAULT_FORBIDDEN_LOSS_TYPES = [
+    "数字对比",
+    "因果链",
+    "机制解释",
+    "关键例子",
+    "关键类比",
+    "转折点",
+    "结论代价",
+]
+
+ALLOWED_NARRATOR_SCENE_TYPES = {
+    "HOST_OPENING",
+    "HOST_EXPLANATION",
+    "MAP_ANIMATION",
+    "TIMELINE_CARD",
+    "HISTORICAL_REENACTMENT",
+    "INFOGRAPHIC",
+    "SYMBOLIC_MONTAGE",
+    "COMPARISON_SPLIT_SCREEN",
+    "TRANSITION_CARD",
+    "THEME_CALLBACK",
+}
+
+VISUAL_LAYER_KEYS = [
+    "main_visual",
+    "character_action",
+    "environment",
+    "camera",
+    "animation_logic",
+    "transition",
+]
+
+MODERN_EXPLANATION_TERMS = [
+    "认知革命",
+    "大脑耗能",
+    "DNA",
+    "物种",
+    "社会分工",
+    "语言学家",
+    "考古学家",
+    "史实",
+    "证据显示",
+    "大约",
+    "大约7万年前",
+    "百分比",
+    "能量消耗",
+    "自然选择",
+    "演化",
+    "机制",
+    "因果",
+    "尼安德特人DNA",
+    "复杂语言",
+    "象征思维",
+]
+
+
+def build_content_atoms_extraction_prompt(payload: Any, title: str | None = None) -> str:
+    if isinstance(payload, dict):
+        source = {
+            "title": payload.get("title") or title or "",
+            "topic": payload.get("topic") or "",
+            "time_range": payload.get("time_range") or "",
+            "article": payload.get("article") or "",
+        }
+    else:
+        source = {
+            "title": title or "",
+            "article": payload or "",
+        }
+    return f"""
+你是“内容原子提取 Agent”。
+
+你不是摘要器。
+你不是提纲生成器。
+你的任务是提取原文里的“内容支撑原子”，不是把原文讲短。
+
+必须遵守：
+1. 不要总结原文。
+2. 不要压缩成大纲。
+3. 不要为了短而删除细节。
+4. 要尽可能保留原文中的推理支撑。
+5. 每个数字、对比、因果、机制、例子、类比、历史转折，都应成为独立 content_atom。
+6. 如果一个句子同时包含事实、因果和类比，要拆成多个 atom。
+7. 标记 must_keep。
+8. 标记 compression_allowed。
+9. 输出 causal_chain，说明这些 atom 如何构成推理链。
+10. 不要新增原文没有的史实。
+11. 不要把幽默类比误判为可以删除的废话。很多类比是观众理解机制的关键支撑。
+12. 数字对比、机制解释、关键例子、关键类比、历史转折默认 must_keep=true。
+13. 如果无法判断某个点是否重要，默认保留。
+
+输出严格 JSON object，结构必须是：
+{{
+  "content_atoms": [
+    {{
+      "atom_id": "P01-A01",
+      "source_paragraph": 1,
+      "atom_type": "fact | number | comparison | cause_effect | mechanism | analogy | example | transition | claim | consequence | visual_hook",
+      "text": "从原文中抽取出的不可丢失内容",
+      "reasoning_role": "premise | evidence | mechanism | consequence | contrast | turning_point | audience_hook | conclusion",
+      "must_keep": true,
+      "compression_allowed": false,
+      "visual_potential": "这个内容适合如何视觉化",
+      "narrator_hint": "这个内容适合讲述人怎么讲"
+    }}
+  ],
+  "causal_chain": [
+    {{
+      "step_id": "C01",
+      "from_atoms": ["P01-A01"],
+      "to_atoms": ["P01-A02"],
+      "logic": "这些内容原子之间的因果或论证关系"
+    }}
+  ],
+  "retention_requirements": {{
+    "must_keep_atom_ids": [],
+    "minimum_retention_ratio": 0.92,
+    "forbidden_loss_types": ["数字对比", "因果链", "机制解释", "关键例子", "关键类比", "转折点", "结论代价"]
+  }}
+}}
+
+原文：
+{json.dumps(source, ensure_ascii=False, indent=2)}
+
+输出严格 json object。
+""".strip()
+
+
+def build_narrator_scene_adaptation_prompt(
+    article: str,
+    content_atoms_payload: dict[str, Any],
+    title: str | None = None,
+) -> str:
+    normalized_atoms = normalize_content_atoms_payload(content_atoms_payload, fallback_article=article)
+    source = {
+        "title": title or "",
+        "article": article or "",
+        "content_atoms": normalized_atoms["content_atoms"],
+        "causal_chain": normalized_atoms["causal_chain"],
+        "retention_requirements": normalized_atoms["retention_requirements"],
+    }
+    return f"""
+你不是摘要器。
+你不是传统短剧编剧。
+你正在改造的是“讲述人驱动的 AI 科普漫剧分场脚本”。
+
+必须遵守：
+1. 不要把原文改短。
+2. 不要把原文改成提纲。
+3. 不要只保留历史主线。
+4. 不要为了短而删掉推理链。
+5. 原文中的数字、对比、因果、机制、例子、类比、关键转折，必须进入 scene_script。
+6. 每个场景不只是讲发生了什么，还必须讲为什么重要。
+7. 场景不是原文自然段，而是一个“知识推理单元 + 视觉表达单元”。
+8. 每个场景只完成一个主要知识任务，但这个知识任务必须包含完整支撑链。
+9. 一个场景可以包含多个 content_atoms，只要它们共同服务同一个推理点。
+10. 所有解释性、知识性、因果性、总结性、吐槽性内容由讲述人说。
+11. 历史人物只能做画面演绎，不能承担现代知识解释。
+12. 每个 scene 必须引用 source_atoms。
+13. must_keep=true 的 atom 必须被某个 scene 引用。
+14. 如果内容太多，优先增加场景数量，不要删除 must_keep atoms。
+15. 不要按原文自然段机械切场。
+16. 时间变化、地点变化、知识任务变化、视觉形式变化、情绪功能变化时，必须考虑切场。
+17. 每个 scene 必须包含 scene_type、source_atoms、knowledge_payload、narrator_lines、visual_layer、screen_text、fact_boundary。
+18. 不要新增原文没有的史实。
+19. 如果必须进行合理场景化，必须在 fact_boundary 里说明。
+20. historical_character_dialogue 只能少量出现，只能是生活化短句，不能承担知识解释。
+21. 如果一句台词听起来像现代科普解释，必须放入 narrator_lines，而不是 historical_character_dialogue。
+
+失败判定：
+- 每场没有 reasoning_chain，判定失败或低分。
+- 每场没有 must_keep_details，判定失败或低分。
+- 大量数字、对比、例子、类比被删除，判定失败或低分。
+- 场景只回答“发生了什么”，没有回答“为什么重要”，判定失败或低分。
+- content_atoms 覆盖率低于 90%，判定失败或低分。
+- 历史人物开始讲现代知识，判定失败或低分。
+
+scene_type 只能从以下类型中选择，可用 “ + ” 组合：
+- HOST_OPENING
+- HOST_EXPLANATION
+- MAP_ANIMATION
+- TIMELINE_CARD
+- HISTORICAL_REENACTMENT
+- INFOGRAPHIC
+- SYMBOLIC_MONTAGE
+- COMPARISON_SPLIT_SCREEN
+- TRANSITION_CARD
+- THEME_CALLBACK
+
+输出严格 JSON object，结构必须是：
+{{
+  "title": "分场脚本标题",
+  "format": "narrator_led_science_comic",
+  "narrator_profile": {{
+    "role": "虚拟科普老师 / 旁白 / 字幕讲述人",
+    "tone": "幽默、清楚、有纪录片感",
+    "visual_presence": "avatar | voice_only | subtitle_only | mixed"
+  }},
+  "episode_structure": {{
+    "main_question": "这集要回答的核心问题",
+    "core_thesis": "观众看完后要记住的核心观点",
+    "target_duration_min": 8,
+    "estimated_scene_count": 16
+  }},
+  "scene_script": [
+    {{
+      "scene_id": "S01",
+      "scene_title": "场景标题",
+      "scene_type": "HOST_EXPLANATION + INFOGRAPHIC",
+      "duration_sec": 25,
+      "beat_function": "问题提出 / 困境建立 / 机制解释 / 历史转折 / 结果展示 / 代价揭示 / 主题回扣",
+      "source_atoms": ["P02-A01", "P02-A02"],
+      "knowledge_payload": {{
+        "core_question": "这一场回答什么问题",
+        "reasoning_chain": "这一场内部的因果链",
+        "must_keep_details": ["不能丢的数字、例子、对比、机制"],
+        "audience_takeaway": "观众看完这一场应该明白什么"
+      }},
+      "narrator_lines": ["讲述人台词"],
+      "visual_layer": {{
+        "main_visual": "画面主内容",
+        "character_action": "历史人物或群体做什么；没有就写无",
+        "environment": "时间、地点、环境氛围",
+        "camera": "镜头组织方式",
+        "animation_logic": "地图、箭头、字幕、图解、符号如何动起来",
+        "transition": "如何进入下一场"
+      }},
+      "screen_text": ["关键词"],
+      "historical_character_dialogue": [
+        {{
+          "speaker": "角色名",
+          "line": "极短生活化台词",
+          "purpose": "气氛/幽默/情绪",
+          "evidence_level": "合理场景化"
+        }}
+      ],
+      "audio_hint": "旁白、环境音、音乐或音效建议",
+      "fact_boundary": "史实明确支持 | 合理场景化 | 需人工核对",
+      "next_scene_hook": "下一场钩子"
+    }}
+  ],
+  "adaptation_notes": [],
+  "review_notes": [],
+  "content_atoms": [],
+  "causal_chain": [],
+  "retention_review": {{}},
+  "scene_review": {{}},
+  "adapted_article": "",
+  "adapted_segments": []
+}}
+
+输入：
+{json.dumps(source, ensure_ascii=False, indent=2)}
+""".strip()
+
+
+def build_narrator_scene_plan_prompt(payload: dict[str, Any]) -> str:
+    content_atoms_payload = normalize_content_atoms_payload(payload, fallback_article=str(payload.get("article") or ""))
+    source = {
+        "title": payload.get("title") or "",
+        "topic": payload.get("topic") or "",
+        "time_range": payload.get("time_range") or "",
+        "article": payload.get("article") or "",
+        "content_atoms": content_atoms_payload["content_atoms"],
+        "causal_chain": content_atoms_payload["causal_chain"],
+        "retention_requirements": content_atoms_payload["retention_requirements"],
+    }
+    return f"""
+你是讲述人驱动科普漫剧的分场规划 Agent。
+
+任务：
+- 不要写最终旁白。
+- 只规划场景。
+- 每个 scene 必须引用 source_atoms。
+- must_keep=true 的 atom 必须全部进入某个 scene。
+- 如果内容太多，优先增加场景数量，不要删除 must_keep atom。
+- 不要按原文自然段机械分场。
+- 场景是“知识推理单元 + 视觉表达单元”。
+- 每个场景都要回答“发生了什么”和“为什么重要”。
+- 不要新增原文没有的史实。
+
+输出严格 json object，结构必须是：
+{{
+  "scene_plan": [
+    {{
+      "scene_id": "S01",
+      "scene_title": "场景标题",
+      "scene_type": "HOST_OPENING + MAP_ANIMATION",
+      "beat_function": "开场钩子 / 困境建立 / 机制解释 / 历史转折 / 结果展示 / 代价揭示 / 主题回扣",
+      "source_atoms": ["P01-A01", "P01-A02"],
+      "knowledge_task": "这一场要完成的知识任务",
+      "reasoning_goal": "这一场要讲清的为什么",
+      "must_keep_details": ["本场必须保留的数字、因果、类比或例子"],
+      "visual_strategy": "地图 / 图解 / 历史重现 / 蒙太奇 / 对比画面",
+      "estimated_duration_sec": 25
+    }}
+  ],
+  "episode_structure": {{
+    "main_question": "",
+    "core_thesis": "",
+    "estimated_scene_count": 0,
+    "target_duration_min": 10
+  }}
+}}
+
+输入：
+{json.dumps(source, ensure_ascii=False, indent=2)}
+""".strip()
+
+
+def build_narrator_scene_batch_prompt(payload: dict[str, Any]) -> str:
+    source = {
+        "title": payload.get("title") or "",
+        "article": payload.get("article") or "",
+        "content_atoms": normalize_content_atoms(payload.get("content_atoms")),
+        "causal_chain": normalize_causal_chain(payload.get("causal_chain")),
+        "episode_structure": payload.get("episode_structure") if isinstance(payload.get("episode_structure"), dict) else {},
+        "scene_plan": normalize_scene_plan(payload.get("scene_plan")),
+    }
+    return f"""
+你不是摘要器。
+你不是传统短剧编剧。
+你正在根据 scene_plan 写“讲述人驱动的 AI 科普漫剧分场脚本”的一批场景。
+
+硬规则：
+- 不要为了短而删掉推理链。
+- 不要只保留历史主线。
+- 每个场景不只是讲“发生了什么”，还必须讲“为什么重要”。
+- 每个场景必须引用 source_atoms。
+- must_keep_details 必须进入 narrator_lines、visual_layer 或 screen_text。
+- 所有解释性、知识性、因果性、总结性、吐槽性内容由讲述人说。
+- 历史人物只能做画面演绎，不能承担现代知识解释。
+- historical_character_dialogue 只能少量出现，只能是生活化短句。
+- 如果一句台词听起来像现代科普解释，必须放入 narrator_lines。
+- 不要新增原文没有的史实。
+- 输出严格 json object。
+
+输出结构：
+{{
+  "scene_script": []
+}}
+
+输入：
+{json.dumps(source, ensure_ascii=False, indent=2)}
+""".strip()
+
+
+def build_repair_missing_atoms_prompt(payload: dict[str, Any]) -> str:
+    source = {
+        "original_payload": payload.get("original_payload") or {},
+        "retention_review": payload.get("retention_review") or {},
+        "missing_must_keep_atoms": normalize_string_list(payload.get("missing_must_keep_atoms")),
+        "content_atoms": normalize_content_atoms(payload.get("content_atoms")),
+        "scene_plan": normalize_scene_plan(payload.get("scene_plan")),
+    }
+    return f"""
+你是分场脚本内容保真修复 Agent。
+
+修复规则：
+- 不要重写全片。
+- 只补 missing_must_keep_atoms。
+- 可以新增 scene，也可以补充已有 scene 的 narrator_lines、knowledge_payload、screen_text 和 visual_layer。
+- 不要删除已有合格场景。
+- 每个新增或修复场景必须引用 source_atoms。
+- 不要新增原文没有的史实。
+- 输出严格 json object。
+
+输出结构：
+{{
+  "scene_script": []
+}}
+
+输入：
+{json.dumps(source, ensure_ascii=False, indent=2)}
+""".strip()
+
+
+def normalize_content_atoms_payload(payload: Any, fallback_article: str = "") -> dict[str, Any]:
+    payload = normalize_json_object(payload)
+    content_atoms = normalize_content_atoms(payload.get("content_atoms"))
+    causal_chain = normalize_causal_chain(payload.get("causal_chain"))
+    requirements = payload.get("retention_requirements") if isinstance(payload.get("retention_requirements"), dict) else {}
+    must_keep_atom_ids = normalize_string_list(requirements.get("must_keep_atom_ids"))
+    if not must_keep_atom_ids:
+        must_keep_atom_ids = [atom["atom_id"] for atom in content_atoms if atom.get("must_keep")]
     return {
-        "title": str(payload.get("title") or "分镜剧本"),
+        "content_atoms": content_atoms,
+        "causal_chain": causal_chain,
+        "retention_requirements": {
+            "must_keep_atom_ids": must_keep_atom_ids,
+            "minimum_retention_ratio": normalize_ratio(requirements.get("minimum_retention_ratio"), default=0.92),
+            "forbidden_loss_types": normalize_string_list(requirements.get("forbidden_loss_types"))
+            or list(DEFAULT_FORBIDDEN_LOSS_TYPES),
+        },
+        "source_article_excerpt": str(payload.get("source_article_excerpt") or fallback_article or "")[:1200],
+    }
+
+
+def normalize_content_atoms(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    atoms: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if isinstance(item, str):
+            item = {"text": item}
+        if not isinstance(item, dict):
+            continue
+        source_paragraph = normalize_int(item.get("source_paragraph"), default=0)
+        atom_id = str(item.get("atom_id") or "").strip()
+        if not atom_id:
+            atom_id = f"P{source_paragraph:02d}-A{index:02d}" if source_paragraph else f"A{index:03d}"
+        atom_type = str(item.get("atom_type") or "").strip()
+        if atom_type not in ATOM_TYPES:
+            atom_type = "claim"
+        reasoning_role = str(item.get("reasoning_role") or "").strip()
+        if reasoning_role not in REASONING_ROLES:
+            reasoning_role = "premise"
+        atoms.append(
+            {
+                "atom_id": atom_id,
+                "source_paragraph": source_paragraph,
+                "atom_type": atom_type,
+                "text": str(item.get("text") or "").strip(),
+                "reasoning_role": reasoning_role,
+                "must_keep": normalize_bool(item.get("must_keep"), default=True),
+                "compression_allowed": normalize_bool(item.get("compression_allowed"), default=False),
+                "visual_potential": str(item.get("visual_potential") or ""),
+                "narrator_hint": str(item.get("narrator_hint") or ""),
+            }
+        )
+    return atoms
+
+
+def normalize_causal_chain(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    chain: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if isinstance(item, str):
+            item = {"logic": item}
+        if not isinstance(item, dict):
+            continue
+        chain.append(
+            {
+                "step_id": str(item.get("step_id") or f"C{index:02d}"),
+                "from_atoms": normalize_string_list(item.get("from_atoms")),
+                "to_atoms": normalize_string_list(item.get("to_atoms")),
+                "logic": str(item.get("logic") or ""),
+            }
+        )
+    return chain
+
+
+def normalize_scene_plan_payload(payload: Any) -> dict[str, Any]:
+    payload = normalize_json_object(payload)
+    scene_plan = normalize_scene_plan(payload.get("scene_plan"))
+    episode_structure = payload.get("episode_structure") if isinstance(payload.get("episode_structure"), dict) else {}
+    return {
+        "scene_plan": scene_plan,
+        "episode_structure": {
+            "main_question": str(episode_structure.get("main_question") or ""),
+            "core_thesis": str(episode_structure.get("core_thesis") or ""),
+            "estimated_scene_count": normalize_int(
+                episode_structure.get("estimated_scene_count"),
+                default=len(scene_plan),
+            ),
+            "target_duration_min": normalize_int(episode_structure.get("target_duration_min"), default=10),
+        },
+    }
+
+
+def normalize_scene_plan(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    plan: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        plan.append(
+            {
+                "scene_id": str(item.get("scene_id") or f"S{index:02d}"),
+                "scene_title": str(item.get("scene_title") or item.get("title") or "未命名场景"),
+                "scene_type": normalize_scene_type(item.get("scene_type")),
+                "beat_function": str(item.get("beat_function") or ""),
+                "source_atoms": normalize_string_list(item.get("source_atoms")),
+                "knowledge_task": str(item.get("knowledge_task") or ""),
+                "reasoning_goal": str(item.get("reasoning_goal") or ""),
+                "must_keep_details": normalize_string_list(item.get("must_keep_details")),
+                "visual_strategy": str(item.get("visual_strategy") or ""),
+                "estimated_duration_sec": normalize_int(item.get("estimated_duration_sec"), default=25),
+            }
+        )
+    return plan
+
+
+def normalize_narrator_scene_script_payload(payload: dict[str, Any], *, fallback_article: str) -> dict[str, Any]:
+    payload = normalize_json_object(payload)
+
+    scene_script = normalize_scene_script(payload.get("scene_script"))
+    if not scene_script:
+        scene_script = legacy_adapted_segments_to_scene_script(payload.get("adapted_segments"))
+
+    scene_texts = []
+    for scene in scene_script:
+        lines = [str(line).strip() for line in scene.get("narrator_lines", []) if str(line).strip()]
+        if lines:
+            scene_texts.append("\n".join(lines))
+    adapted_article = "\n\n".join(scene_texts).strip()
+    if not adapted_article:
+        adapted_article = str(payload.get("adapted_article") or "").strip() or fallback_article
+
+    adapted_segments = scene_script_to_legacy_adapted_segments(scene_script)
+    if not adapted_segments:
+        adapted_segments = normalize_adapted_segments(payload.get("adapted_segments"))
+
+    content_atoms_payload = normalize_content_atoms_payload(payload, fallback_article=fallback_article)
+    scene_plan_payload = normalize_scene_plan_payload(payload)
+    narrator_profile = payload.get("narrator_profile") if isinstance(payload.get("narrator_profile"), dict) else {}
+    episode_structure = payload.get("episode_structure") if isinstance(payload.get("episode_structure"), dict) else {}
+    normalized = {
+        "title": str(payload.get("title") or "分场脚本"),
+        "format": "narrator_led_science_comic",
+        "narrator_profile": {
+            "role": str(narrator_profile.get("role") or "虚拟科普老师 / 旁白 / 字幕讲述人"),
+            "tone": str(narrator_profile.get("tone") or "幽默、清楚、有纪录片感"),
+            "visual_presence": normalize_visual_presence(narrator_profile.get("visual_presence")),
+        },
+        "episode_structure": {
+            "main_question": str(episode_structure.get("main_question") or ""),
+            "core_thesis": str(episode_structure.get("core_thesis") or ""),
+            "target_duration_min": normalize_int(episode_structure.get("target_duration_min"), default=8),
+            "estimated_scene_count": normalize_int(
+                episode_structure.get("estimated_scene_count"),
+                default=len(scene_script) or 16,
+            ),
+        },
+        "scene_script": scene_script,
+        "scene_plan": scene_plan_payload["scene_plan"],
+        "content_atoms": content_atoms_payload["content_atoms"],
+        "causal_chain": content_atoms_payload["causal_chain"],
+        "retention_requirements": content_atoms_payload["retention_requirements"],
+        "retention_review": {},
+        "scene_review": {},
         "adapted_article": adapted_article,
-        "adapted_segments": segments,
+        "adapted_segments": adapted_segments,
         "adaptation_notes": normalize_string_list(payload.get("adaptation_notes")),
         "review_notes": normalize_string_list(payload.get("review_notes")),
         "raw": payload,
     }
+    normalized["retention_review"] = validate_content_retention(content_atoms_payload, scene_script)
+    normalized["scene_review"] = validate_narrator_scene_script(normalized)
+    return normalized
+
+
+def normalize_storyboard_script_payload(payload: dict[str, Any], *, fallback_article: str) -> dict[str, Any]:
+    return normalize_narrator_scene_script_payload(payload, fallback_article=fallback_article)
+
+
+MANUAL_STORYBOARD_SECTION_TITLES = {
+    "讲述人旁白": "narrator",
+    "画面演绎": "visual",
+    "屏幕文字": "screen_text",
+    "历史人物对白": "dialogue",
+    "保留支撑点": "support",
+}
+
+
+def parse_manual_storyboard_script(raw_text: str, title: str = "") -> dict[str, Any]:
+    text = normalize_line_endings(raw_text).strip()
+    if not text:
+        raise ValueError("请先粘贴分镜剧本内容")
+    scenes = parse_manual_storyboard_scenes(text)
+    if not scenes:
+        raise ValueError("没有识别到 S01｜... 这样的分镜场景标题")
+    readable_text = scene_script_to_readable_storyboard_text(scenes)
+    return {
+        "title": title or "手动分镜剧本",
+        "format": "manual_storyboard_script",
+        "narrator_profile": {
+            "role": "虚拟科普老师 / 旁白 / 字幕讲述人",
+            "tone": "幽默、清楚、有纪录片感",
+            "visual_presence": "mixed",
+        },
+        "episode_structure": {
+            "main_question": "",
+            "core_thesis": "",
+            "target_duration_min": 10,
+            "estimated_scene_count": len(scenes),
+        },
+        "scene_plan": [],
+        "scene_script": scenes,
+        "content_atoms": [],
+        "causal_chain": [],
+        "retention_review": {},
+        "scene_review": validate_narrator_scene_script({"scene_script": scenes}),
+        "adaptation_notes": ["用户粘贴分镜剧本，本地解析并格式化展示。"],
+        "review_notes": [],
+        "adapted_article": readable_text,
+        "adapted_segments": scene_script_to_legacy_adapted_segments(scenes),
+        "manual_raw_text": text,
+        "created_at": current_timestamp(),
+    }
+
+
+def parse_manual_storyboard_scenes(text: str) -> list[dict[str, Any]]:
+    matches = list(re.finditer(r"(?m)^(S\d{2,})\s*[｜|]\s*(.+?)\s*$", text))
+    scenes = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        scenes.append(parse_manual_storyboard_scene(match.group(1), match.group(2), text[start:end], index + 1))
+    return scenes
+
+
+def parse_manual_storyboard_scene(scene_id: str, scene_title: str, body: str, index: int) -> dict[str, Any]:
+    metadata: dict[str, str] = {}
+    sections: dict[str, list[str]] = {value: [] for value in MANUAL_STORYBOARD_SECTION_TITLES.values()}
+    current_section = ""
+    for raw_line in normalize_line_endings(body).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line in MANUAL_STORYBOARD_SECTION_TITLES:
+            current_section = MANUAL_STORYBOARD_SECTION_TITLES[line]
+            continue
+        if current_section:
+            sections[current_section].append(line)
+            continue
+        key, value = split_manual_metadata_line(line)
+        if key:
+            metadata[key] = value
+
+    support_lines = sections["support"]
+    scene_type = metadata.get("场景类型", "") or "HOST_EXPLANATION"
+    beat_function = metadata.get("功能", "")
+    narrator_lines = sections["narrator"]
+    visual_text = "\n".join(sections["visual"]).strip()
+    screen_text = [line for line in sections["screen_text"] if line]
+    return {
+        "scene_id": scene_id or f"S{index:02d}",
+        "scene_title": scene_title.strip() or "未命名场景",
+        "scene_type": scene_type,
+        "duration_sec": parse_duration_seconds(metadata.get("时长")),
+        "beat_function": beat_function,
+        "source_atoms": parse_source_refs(metadata.get("源稿", "")),
+        "knowledge_payload": {
+            "core_question": scene_title.strip(),
+            "reasoning_chain": beat_function,
+            "must_keep_details": support_lines,
+            "audience_takeaway": support_lines[-1] if support_lines else "",
+        },
+        "narrator_lines": narrator_lines,
+        "visual_layer": normalize_visual_layer({"main_visual": visual_text}),
+        "screen_text": screen_text,
+        "historical_character_dialogue": parse_manual_dialogue(sections["dialogue"]),
+        "audio_hint": "",
+        "fact_boundary": "用户提供分镜稿，需人工核对",
+        "source_trace": normalize_string_list(metadata.get("源稿", "")),
+        "next_scene_hook": "",
+    }
+
+
+def split_manual_metadata_line(line: str) -> tuple[str, str]:
+    match = re.match(r"^([^：:]+)\s*[：:]\s*(.*)$", line)
+    if not match:
+        return "", ""
+    return match.group(1).strip(), match.group(2).strip()
+
+
+def parse_duration_seconds(value: Any) -> int:
+    match = re.search(r"\d+", str(value or ""))
+    if not match:
+        return 25
+    return int(match.group(0))
+
+
+def parse_source_refs(value: str) -> list[str]:
+    refs = re.findall(r"\[([^\]]+)\]", str(value or ""))
+    if refs:
+        return [ref.strip() for ref in refs if ref.strip()]
+    return normalize_string_list(value)
+
+
+def parse_manual_dialogue(lines: list[str]) -> list[dict[str, str]]:
+    compact = "".join(lines).strip()
+    if not compact or compact in {"无", "无。", "无对白", "无对白。"}:
+        return []
+    dialogue = []
+    pending_speaker = ""
+    for line in lines:
+        if line in {"无", "无。"}:
+            continue
+        speaker_match = re.match(r"^(.+?)[：:]\s*(.*)$", line)
+        if speaker_match:
+            pending_speaker = speaker_match.group(1).strip()
+            spoken = speaker_match.group(2).strip().strip("“”")
+            if spoken:
+                dialogue.append(
+                    {
+                        "speaker": pending_speaker or "角色",
+                        "line": spoken,
+                        "purpose": "气氛/幽默/情绪",
+                        "evidence_level": "合理场景化",
+                    }
+                )
+            continue
+        dialogue.append(
+            {
+                "speaker": pending_speaker or "角色",
+                "line": line.strip("“”"),
+                "purpose": "气氛/幽默/情绪",
+                "evidence_level": "合理场景化",
+            }
+        )
+    return [item for item in dialogue if item["line"]]
+
+
+def scene_script_to_readable_storyboard_text(scene_script: Any) -> str:
+    scenes = normalize_scene_script(scene_script)
+    chunks = []
+    for scene in scenes:
+        chunks.append(format_readable_storyboard_scene(scene))
+    return "\n\n".join(chunks).strip()
+
+
+def format_readable_storyboard_scene(scene: dict[str, Any]) -> str:
+    visual_layer = scene.get("visual_layer") if isinstance(scene.get("visual_layer"), dict) else {}
+    knowledge_payload = normalize_knowledge_payload(scene.get("knowledge_payload"))
+    source_refs = " ".join(f"[{source_atom}]" for source_atom in normalize_string_list(scene.get("source_atoms"))) or "无"
+    parts = [
+        f"{scene.get('scene_id') or ''}｜{scene.get('scene_title') or '未命名场景'}".strip(),
+        "",
+        f"场景类型： {scene.get('scene_type') or 'HOST_EXPLANATION'}",
+        f"功能： {scene.get('beat_function') or ''}",
+        f"时长： {normalize_int(scene.get('duration_sec'), default=25)} 秒",
+        f"源稿： {source_refs}",
+        "",
+        "讲述人旁白",
+        "",
+        "\n\n".join(normalize_string_list(scene.get("narrator_lines"))) or "无。",
+        "",
+        "画面演绎",
+        "",
+        readable_visual_layer_text(visual_layer) or "无。",
+        "",
+        "屏幕文字",
+        "\n".join(normalize_string_list(scene.get("screen_text"))) or "无。",
+        "",
+        "历史人物对白",
+        "",
+        readable_dialogue_text(scene.get("historical_character_dialogue")) or "无。",
+        "",
+        "保留支撑点",
+        "\n".join(knowledge_payload["must_keep_details"]) or "无。",
+    ]
+    return "\n".join(parts).strip()
+
+
+def readable_visual_layer_text(visual_layer: dict[str, Any]) -> str:
+    values = []
+    for key in VISUAL_LAYER_KEYS:
+        value = str(visual_layer.get(key) or "").strip()
+        if value and value not in values:
+            values.append(value)
+    return "\n\n".join(values)
+
+
+def readable_dialogue_text(value: Any) -> str:
+    dialogue = normalize_historical_character_dialogue(value)
+    if not dialogue:
+        return ""
+    lines = []
+    for item in dialogue:
+        speaker = item.get("speaker") or "角色"
+        line = item.get("line") or ""
+        lines.append(f"{speaker}：{line}")
+    return "\n".join(lines)
+
+
+def normalize_line_endings(value: str) -> str:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def normalize_scene_script(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    scenes = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, dict):
+            continue
+        narrator_lines = normalize_string_list(item.get("narrator_lines") or item.get("voiceover") or item.get("narration"))
+        visual_layer = normalize_visual_layer(item.get("visual_layer") or item.get("visual_goal"))
+        knowledge_payload = normalize_knowledge_payload(item.get("knowledge_payload"))
+        scenes.append(
+            {
+                "scene_id": str(item.get("scene_id") or f"S{index:02d}"),
+                "scene_title": str(item.get("scene_title") or item.get("title") or "未命名场景"),
+                "scene_type": normalize_scene_type(item.get("scene_type") or item.get("scene_intent")),
+                "duration_sec": normalize_int(item.get("duration_sec"), default=25),
+                "beat_function": str(item.get("beat_function") or item.get("dramatic_function") or ""),
+                "source_atoms": normalize_string_list(item.get("source_atoms")),
+                "knowledge_payload": knowledge_payload,
+                "knowledge_point": str(item.get("knowledge_point") or knowledge_payload.get("core_question") or ""),
+                "narrator_lines": narrator_lines,
+                "visual_layer": visual_layer,
+                "screen_text": normalize_string_list(item.get("screen_text")),
+                "historical_character_dialogue": normalize_historical_character_dialogue(
+                    item.get("historical_character_dialogue") or item.get("dialogue")
+                ),
+                "audio_hint": str(item.get("audio_hint") or ""),
+                "fact_boundary": str(item.get("fact_boundary") or "需人工核对"),
+                "source_trace": normalize_string_list(item.get("source_trace")),
+                "next_scene_hook": str(item.get("next_scene_hook") or item.get("continuity_hint") or ""),
+            }
+        )
+    return scenes
+
+
+def normalize_knowledge_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+    return {
+        "core_question": str(value.get("core_question") or ""),
+        "reasoning_chain": str(value.get("reasoning_chain") or ""),
+        "must_keep_details": normalize_string_list(value.get("must_keep_details")),
+        "audience_takeaway": str(value.get("audience_takeaway") or ""),
+    }
+
+
+def normalize_visual_layer(value: Any) -> dict[str, str]:
+    if isinstance(value, str):
+        value = {"main_visual": value}
+    if not isinstance(value, dict):
+        value = {}
+    visual_layer = {key: str(value.get(key) or "") for key in VISUAL_LAYER_KEYS}
+    if not visual_layer["main_visual"]:
+        visual_layer["main_visual"] = str(value.get("visual_goal") or value.get("description") or "").strip()
+    if not visual_layer["animation_logic"]:
+        visual_layer["animation_logic"] = str(value.get("visual_progression") or "").strip()
+    return visual_layer
+
+
+def normalize_historical_character_dialogue(value: Any) -> list[dict[str, str]]:
+    if isinstance(value, str):
+        value = [{"line": value}]
+    if not isinstance(value, list):
+        return []
+    dialogue = []
+    for item in value:
+        if isinstance(item, str):
+            item = {"line": item}
+        if not isinstance(item, dict):
+            continue
+        line = str(item.get("line") or "").strip()
+        speaker = str(item.get("speaker") or "角色").strip()
+        if not line and not speaker:
+            continue
+        dialogue.append(
+            {
+                "speaker": speaker or "角色",
+                "line": line,
+                "purpose": str(item.get("purpose") or ""),
+                "evidence_level": str(item.get("evidence_level") or ""),
+            }
+        )
+    return dialogue
+
+
+def scene_script_to_legacy_adapted_segments(scene_script: Any) -> list[dict[str, str]]:
+    scenes = normalize_scene_script(scene_script)
+    segments = []
+    for index, scene in enumerate(scenes, start=1):
+        voiceover = "\n".join(scene.get("narrator_lines") or []).strip()
+        if not voiceover:
+            continue
+        visual_layer = scene.get("visual_layer") if isinstance(scene.get("visual_layer"), dict) else {}
+        segments.append(
+            {
+                "segment_id": f"seg-{index:03d}",
+                "voiceover": voiceover,
+                "dramatic_function": str(scene.get("beat_function") or ""),
+                "visual_goal": str(visual_layer.get("main_visual") or ""),
+                "visual_progression": str(visual_layer.get("animation_logic") or visual_layer.get("transition") or ""),
+                "scene_intent": " + ".join(
+                    part
+                    for part in [
+                        str(scene.get("scene_type") or ""),
+                        str((scene.get("knowledge_payload") or {}).get("core_question") or ""),
+                    ]
+                    if part
+                ),
+                "continuity_hint": str(scene.get("next_scene_hook") or visual_layer.get("transition") or ""),
+                "fact_boundary": str(scene.get("fact_boundary") or ""),
+            }
+        )
+    return segments
+
+
+def legacy_adapted_segments_to_scene_script(value: Any) -> list[dict[str, Any]]:
+    segments = normalize_adapted_segments(value)
+    scenes = []
+    for index, segment in enumerate(segments, start=1):
+        scenes.append(
+            {
+                "scene_id": f"S{index:02d}",
+                "scene_title": f"场景 {index}",
+                "scene_type": normalize_scene_type(segment.get("scene_intent")),
+                "duration_sec": 25,
+                "beat_function": segment.get("dramatic_function", ""),
+                "source_atoms": [],
+                "knowledge_payload": {
+                    "core_question": "",
+                    "reasoning_chain": "",
+                    "must_keep_details": [],
+                    "audience_takeaway": "",
+                },
+                "knowledge_point": "",
+                "narrator_lines": normalize_string_list(segment.get("voiceover")),
+                "visual_layer": normalize_visual_layer(
+                    {
+                        "main_visual": segment.get("visual_goal", ""),
+                        "animation_logic": segment.get("visual_progression", ""),
+                        "transition": segment.get("continuity_hint", ""),
+                    }
+                ),
+                "screen_text": [],
+                "historical_character_dialogue": [],
+                "audio_hint": "",
+                "fact_boundary": segment.get("fact_boundary", "") or "需人工核对",
+                "source_trace": [],
+                "next_scene_hook": segment.get("continuity_hint", ""),
+            }
+        )
+    return scenes
+
+
+def merge_repaired_scenes(original_payload: dict[str, Any], repair_payload: dict[str, Any]) -> dict[str, Any]:
+    original = normalize_narrator_scene_script_payload(
+        original_payload,
+        fallback_article=str(original_payload.get("adapted_article") or ""),
+    )
+    repaired_scenes = normalize_scene_script((repair_payload or {}).get("scene_script"))
+    if not repaired_scenes:
+        return original
+
+    by_id = {scene["scene_id"]: scene for scene in original.get("scene_script", [])}
+    order = [scene["scene_id"] for scene in original.get("scene_script", [])]
+    for scene in repaired_scenes:
+        scene_id = scene["scene_id"]
+        by_id[scene_id] = scene
+        if scene_id not in order:
+            order.append(scene_id)
+    merged = {
+        **original,
+        "scene_script": [by_id[scene_id] for scene_id in order],
+        "repair_notes": normalize_string_list((repair_payload or {}).get("repair_notes")),
+    }
+    return normalize_narrator_scene_script_payload(merged, fallback_article=original.get("adapted_article") or "")
+
+
+def validate_content_retention(
+    content_atoms_payload: dict[str, Any],
+    scene_script: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_atoms = normalize_content_atoms_payload(content_atoms_payload)
+    atoms = normalized_atoms["content_atoms"]
+    requirements = normalized_atoms["retention_requirements"]
+    scenes = normalize_scene_script(scene_script)
+    issues: list[dict[str, str]] = []
+
+    if not atoms:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "coverage",
+                "description": "content_atoms 为空，无法确认原文推理细节是否被保留。",
+                "suggestion": "先从原文提取内容原子，再生成讲述人分场脚本。",
+            }
+        )
+    if not scenes:
+        issues.append(
+            {
+                "severity": "critical",
+                "category": "structure",
+                "description": "scene_script 为空，无法检查内容保真。",
+                "suggestion": "生成至少一个引用 source_atoms 的分场。",
+            }
+        )
+
+    covered_atoms: set[str] = set()
+    reasoning_missing_count = 0
+    combined_scene_text_parts: list[str] = []
+    scene_with_source_count = 0
+    for scene in scenes:
+        source_atoms = set(normalize_string_list(scene.get("source_atoms")))
+        if source_atoms:
+            scene_with_source_count += 1
+        covered_atoms.update(source_atoms)
+        knowledge_payload = normalize_knowledge_payload(scene.get("knowledge_payload"))
+        if not knowledge_payload["reasoning_chain"]:
+            reasoning_missing_count += 1
+        combined_scene_text_parts.extend(normalize_string_list(scene.get("narrator_lines")))
+        combined_scene_text_parts.extend(normalize_string_list(scene.get("screen_text")))
+
+    if scenes and scene_with_source_count == 0:
+        issues.append(
+            {
+                "severity": "critical",
+                "category": "source_atoms",
+                "description": "scene_script 中所有 scene 的 source_atoms 都为空。",
+                "suggestion": "每个 scene 必须引用它覆盖的 content_atoms。",
+            }
+        )
+
+    atom_ids = {atom["atom_id"] for atom in atoms}
+    covered_known_atoms = covered_atoms & atom_ids
+    coverage_ratio = round(len(covered_known_atoms) / len(atom_ids), 4) if atom_ids else 0.0
+    minimum_retention_ratio = normalize_ratio(requirements.get("minimum_retention_ratio"), default=0.92)
+
+    must_keep_ids = set(requirements.get("must_keep_atom_ids") or [])
+    must_keep_ids.update(atom["atom_id"] for atom in atoms if atom.get("must_keep"))
+    missing_must_keep_atoms = sorted(must_keep_ids - covered_known_atoms)
+    if missing_must_keep_atoms:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "coverage",
+                "description": f"有 {len(missing_must_keep_atoms)} 个 must_keep content_atoms 未被 scene_script 覆盖。",
+                "suggestion": "为缺失 atom 增加场景，或把它们加入相关 scene 的 source_atoms 和台词支撑。",
+            }
+        )
+
+    if atoms and coverage_ratio < minimum_retention_ratio:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "coverage",
+                "description": f"content_atoms 覆盖率 {coverage_ratio:.2f} 低于要求 {minimum_retention_ratio:.2f}。",
+                "suggestion": "优先增加场景数量，不要删除 must_keep atoms。",
+            }
+        )
+
+    missing_loss_types = sorted(
+        {
+            atom["atom_type"]
+            for atom in atoms
+            if atom.get("atom_type") in DETAIL_LOSS_ATOM_TYPES and atom.get("atom_id") not in covered_known_atoms
+        }
+    )
+    for atom_type in missing_loss_types:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "detail_loss",
+                "description": f"{atom_type} 类型 content_atoms 未被覆盖，可能丢失推理支撑。",
+                "suggestion": "把数字对比、机制解释、因果、例子或类比写入对应 scene。",
+            }
+        )
+
+    if scenes and reasoning_missing_count > len(scenes) / 2:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "reasoning",
+                "description": "多数 scene 缺少 knowledge_payload.reasoning_chain。",
+                "suggestion": "每场都要说明这个知识单元内部的因果链或论证链。",
+            }
+        )
+
+    combined_scene_text = "\n".join(combined_scene_text_parts)
+    for atom in atoms:
+        if atom["atom_id"] not in covered_known_atoms:
+            continue
+        numbers = re.findall(r"\d+(?:\.\d+)?%?|\d+(?:\.\d+)?", atom.get("text") or "")
+        if numbers and not any(number in combined_scene_text for number in numbers):
+            issues.append(
+                {
+                    "severity": "major",
+                    "category": "detail_loss",
+                    "description": f"{atom['atom_id']} 含有数字信息，但 narrator_lines 和 screen_text 未体现这些数字。",
+                    "suggestion": "把关键数字或比例放进讲述人台词或屏幕文字。",
+                }
+            )
+            break
+
+    analogy_example_atoms = [atom for atom in atoms if atom.get("atom_type") in {"analogy", "example"}]
+    if analogy_example_atoms:
+        covered_analogy_examples = [
+            atom for atom in analogy_example_atoms if atom.get("atom_id") in covered_known_atoms
+        ]
+        if len(covered_analogy_examples) / len(analogy_example_atoms) < 0.5:
+            issues.append(
+                {
+                    "severity": "major",
+                    "category": "detail_loss",
+                    "description": "analogy/example 类型 content_atoms 大量未覆盖，观众理解支撑可能被删掉。",
+                    "suggestion": "保留关键类比和例子，尤其是帮助解释机制的幽默类比。",
+                }
+            )
+
+    severity_counts = count_issue_severities(issues)
+    if severity_counts["critical"]:
+        score = 1
+    elif atoms and (coverage_ratio < 0.8 or len(missing_must_keep_atoms) >= 3):
+        score = 2
+    elif severity_counts["major"]:
+        score = 3
+    elif coverage_ratio >= 0.9 and severity_counts["minor"]:
+        score = 4
+    elif coverage_ratio >= 0.95 and not severity_counts["major"]:
+        score = 5
+    else:
+        score = 4
+    passed = (
+        not severity_counts["critical"]
+        and not severity_counts["major"]
+        and bool(atoms)
+        and bool(scenes)
+        and coverage_ratio >= minimum_retention_ratio
+        and not missing_must_keep_atoms
+    )
+    return {
+        "passed": passed,
+        "score": score,
+        "coverage_ratio": coverage_ratio,
+        "missing_must_keep_atoms": missing_must_keep_atoms,
+        "missing_loss_types": missing_loss_types,
+        "issues": issues,
+    }
+
+
+def validate_narrator_scene_script(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        payload = {}
+    scenes = payload.get("scene_script") if isinstance(payload.get("scene_script"), list) else []
+    issues: list[dict[str, str]] = []
+    if not scenes:
+        issues.append(
+            {
+                "severity": "critical",
+                "category": "structure",
+                "description": "scene_script 为空，无法作为分场脚本进入后续生产。",
+                "suggestion": "至少生成一个讲述人驱动的视听表达单元。",
+            }
+        )
+
+    narrator_chars = 0
+    dialogue_chars = 0
+    scene_types = []
+    screen_text_empty_count = 0
+    animation_logic_empty_count = 0
+    for index, scene in enumerate(scenes, start=1):
+        if not isinstance(scene, dict):
+            continue
+        scene_label = str(scene.get("scene_id") or f"S{index:02d}")
+        narrator_lines = normalize_string_list(scene.get("narrator_lines"))
+        narrator_chars += count_text_chars("".join(narrator_lines))
+        if not narrator_lines:
+            issues.append(
+                {
+                    "severity": "major",
+                    "category": "narrator",
+                    "description": f"{scene_label} 缺少 narrator_lines。",
+                    "suggestion": "把解释、因果、吐槽和转场信息写入讲述人台词。",
+                }
+            )
+        if len(narrator_lines) > 4:
+            issues.append(
+                {
+                    "severity": "minor",
+                    "category": "narrator",
+                    "description": f"{scene_label} 的 narrator_lines 超过 4 句，可能没有真正分场。",
+                    "suggestion": "把不同知识任务或情绪任务拆成多个场景。",
+                }
+            )
+
+        visual_layer = scene.get("visual_layer") if isinstance(scene.get("visual_layer"), dict) else {}
+        if not str(visual_layer.get("main_visual") or "").strip():
+            issues.append(
+                {
+                    "severity": "major",
+                    "category": "visual",
+                    "description": f"{scene_label} 缺少 visual_layer.main_visual。",
+                    "suggestion": "补充这一场最主要的画面内容。",
+                }
+            )
+        if not normalize_string_list(scene.get("screen_text")):
+            screen_text_empty_count += 1
+            issues.append(
+                {
+                    "severity": "minor",
+                    "category": "visual",
+                    "description": f"{scene_label} 缺少 screen_text。",
+                    "suggestion": "补充屏幕关键词、概念词、时间地点或转场卡。",
+                }
+            )
+        if not str(scene.get("fact_boundary") or "").strip():
+            issues.append(
+                {
+                    "severity": "minor",
+                    "category": "fact_boundary",
+                    "description": f"{scene_label} 缺少 fact_boundary。",
+                    "suggestion": "标注史实明确支持、合理场景化或需人工核对。",
+                }
+            )
+        if not normalize_string_list(scene.get("source_atoms")):
+            issues.append(
+                {
+                    "severity": "major",
+                    "category": "structure",
+                    "description": f"{scene_label} 缺少 source_atoms。",
+                    "suggestion": "每个 scene 必须引用它覆盖的 content_atoms。",
+                }
+            )
+        knowledge_payload = normalize_knowledge_payload(scene.get("knowledge_payload"))
+        if not knowledge_payload["reasoning_chain"]:
+            issues.append(
+                {
+                    "severity": "major",
+                    "category": "structure",
+                    "description": f"{scene_label} 缺少 knowledge_payload.reasoning_chain。",
+                    "suggestion": "写清这一场内部的因果链或论证链。",
+                }
+            )
+        if not str(visual_layer.get("animation_logic") or "").strip():
+            animation_logic_empty_count += 1
+
+        dialogue = normalize_historical_character_dialogue(scene.get("historical_character_dialogue"))
+        for line in dialogue:
+            dialogue_text = line.get("line", "")
+            dialogue_chars += count_text_chars(dialogue_text)
+            matched_term = find_modern_explanation_term(dialogue_text)
+            if matched_term:
+                issues.append(
+                    {
+                        "severity": "major",
+                        "category": "dialogue",
+                        "description": f"{scene_label} 的历史人物台词出现现代科普解释词“{matched_term}”。",
+                        "suggestion": "把现代知识解释移到 narrator_lines，历史人物只说生活化短句。",
+                    }
+                )
+        scene_type = str(scene.get("scene_type") or "").strip()
+        scene_types.append(scene_type)
+        invalid_scene_types = [
+            part.strip()
+            for part in re.split(r"\s*\+\s*|\s*,\s*|，|、", scene_type)
+            if part.strip() and part.strip() not in ALLOWED_NARRATOR_SCENE_TYPES
+        ]
+        if invalid_scene_types:
+            issues.append(
+                {
+                    "severity": "minor",
+                    "category": "scene_type",
+                    "description": f"{scene_label} 包含不在允许列表中的 scene_type：{', '.join(invalid_scene_types)}。",
+                    "suggestion": "使用 HOST_OPENING、HOST_EXPLANATION、MAP_ANIMATION、INFOGRAPHIC 等允许类型组合。",
+                }
+            )
+
+    if dialogue_chars and dialogue_chars > narrator_chars * 0.25:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "dialogue",
+                "description": "historical_character_dialogue 总字数超过 narrator_lines 总字数的 25%。",
+                "suggestion": "压缩历史人物台词，把解释性内容交还给讲述人。",
+            }
+        )
+
+    for index in range(2, len(scene_types)):
+        if scene_types[index] and scene_types[index] == scene_types[index - 1] == scene_types[index - 2]:
+            issues.append(
+                {
+                    "severity": "minor",
+                    "category": "continuity",
+                    "description": f"{scene_types[index]} 连续出现 3 个场景，视觉节奏可能重复。",
+                    "suggestion": "考虑加入地图、时间线、图解、蒙太奇或转场卡打破重复。",
+                }
+            )
+            break
+
+    if scenes and screen_text_empty_count == len(scenes):
+        issues.append(
+            {
+                "severity": "major",
+                "category": "visual",
+                "description": "所有 scene 的 screen_text 都为空，输出更像文章而不是可生产分场。",
+                "suggestion": "为每场补充屏幕关键词、数字、概念词或转场卡。",
+            }
+        )
+    if scenes and animation_logic_empty_count == len(scenes):
+        issues.append(
+            {
+                "severity": "major",
+                "category": "visual",
+                "description": "所有 scene 的 visual_layer.animation_logic 都为空。",
+                "suggestion": "补充地图、箭头、图解、符号、字幕或转场如何运动。",
+            }
+        )
+    if len(scenes) == 1 and len(normalize_string_list(scenes[0].get("narrator_lines"))) > 4:
+        issues.append(
+            {
+                "severity": "major",
+                "category": "structure",
+                "description": "输出只有一个长场景，更像文章段落而不是结构化分场。",
+                "suggestion": "按知识任务、视觉形式、情绪功能拆成多个 scene。",
+            }
+        )
+
+    severity_counts = count_issue_severities(issues)
+    if severity_counts["critical"]:
+        score = 1
+    else:
+        score = 5 - severity_counts["major"] - (1 if severity_counts["minor"] >= 2 else 0)
+        score = max(1, min(score, 5))
+    return {
+        "passed": not severity_counts["critical"] and not severity_counts["major"] and score >= 4,
+        "score": score,
+        "issues": issues,
+    }
+
+
+def normalize_visual_presence(value: Any) -> str:
+    text = str(value or "").strip()
+    if text in {"avatar", "voice_only", "subtitle_only", "mixed"}:
+        return text
+    return "mixed"
+
+
+def normalize_scene_type(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "HOST_EXPLANATION"
+    parts = [part.strip() for part in re.split(r"\s*\+\s*|\s*,\s*|，|、", text) if part.strip()]
+    return " + ".join(parts) if parts else "HOST_EXPLANATION"
+
+
+def normalize_int(value: Any, *, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def normalize_ratio(value: Any, *, default: float) -> float:
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        return default
+    if ratio > 1:
+        ratio = ratio / 100 if ratio <= 100 else 1
+    if ratio <= 0:
+        return default
+    return min(ratio, 1.0)
+
+
+def normalize_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "y", "是", "对"}:
+        return True
+    if text in {"false", "0", "no", "n", "否", "不"}:
+        return False
+    return default
+
+
+def normalize_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = parse_llm_json_object(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def count_issue_severities(issues: list[dict[str, str]]) -> dict[str, int]:
+    return {
+        "critical": sum(1 for item in issues if item.get("severity") == "critical"),
+        "major": sum(1 for item in issues if item.get("severity") == "major"),
+        "minor": sum(1 for item in issues if item.get("severity") == "minor"),
+    }
+
+
+def count_text_chars(value: str) -> int:
+    return len(re.sub(r"\s+", "", str(value or "")))
+
+
+def find_modern_explanation_term(value: str) -> str:
+    compact = re.sub(r"\s+", "", str(value or ""))
+    for term in MODERN_EXPLANATION_TERMS:
+        if term in compact:
+            return term
+    return ""
 
 
 def normalize_adapted_segments(value: Any) -> list[dict[str, str]]:

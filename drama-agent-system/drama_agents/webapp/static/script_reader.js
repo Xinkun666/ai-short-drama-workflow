@@ -12,8 +12,10 @@
   const editSave = root.querySelector("[data-edit-save]");
   const editCancel = root.querySelector("[data-edit-cancel]");
   const editStatus = root.querySelector("[data-edit-status]");
-  const adaptButton = pageShell.querySelector("[data-script-adapt]");
-  const adaptStatus = pageShell.querySelector("[data-script-adapt-status]");
+  const storyboardManualInput = pageShell.querySelector("[data-storyboard-manual-input]");
+  const storyboardUploadInput = pageShell.querySelector("[data-storyboard-upload]");
+  const storyboardParseButton = pageShell.querySelector("[data-storyboard-parse]");
+  const storyboardParseStatus = pageShell.querySelector("[data-storyboard-parse-status]");
   const ragChat = root.querySelector("[data-rag-chat]");
   const ragComposer = root.querySelector("[data-rag-composer]");
   const ragAsk = root.querySelector("[data-rag-ask]");
@@ -62,6 +64,9 @@
   let historyRequestToken = 0;
 
   function setEditMode(enabled) {
+    if (!display || !editor || !editStart || !editSave || !editCancel) {
+      return;
+    }
     display.hidden = enabled;
     editor.hidden = !enabled;
     editStart.hidden = enabled;
@@ -543,6 +548,9 @@
   }
 
   async function saveArticle() {
+    if (!editor || !editStatus) {
+      return;
+    }
     editStatus.textContent = "正在保存...";
     const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/article`, {
       method: "PATCH",
@@ -558,28 +566,65 @@
     window.location.reload();
   }
 
-  async function adaptStoryboardScript() {
-    if (!adaptButton || !adaptStatus) {
+  async function uploadStoryboardScriptFile() {
+    if (!storyboardUploadInput || !storyboardManualInput || !storyboardParseStatus) {
       return;
     }
-    adaptButton.disabled = true;
-    adaptStatus.textContent = "正在改造分镜剧本...";
+    const file = storyboardUploadInput.files && storyboardUploadInput.files[0];
+    if (!file) {
+      return;
+    }
+    const formData = new FormData();
+    formData.append("file", file);
+    storyboardParseStatus.textContent = "正在读取文件...";
     try {
-      const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/storyboard-script/adapt`, {
+      const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/storyboard-script/upload`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        body: formData,
       });
       const payload = await response.json();
       if (!response.ok) {
-        adaptStatus.textContent = payload.error || "剧本改造失败";
-        adaptButton.disabled = false;
+        storyboardParseStatus.textContent = payload.error || "文件读取失败";
         return;
       }
-      adaptStatus.textContent = "分镜剧本已生成，正在刷新...";
-      window.setTimeout(() => window.location.reload(), 450);
+      storyboardManualInput.value = payload.text || "";
+      storyboardManualInput.focus();
+      storyboardParseStatus.textContent = `${payload.filename || "文件"} 已读取，点击解析。`;
     } catch (error) {
-      adaptStatus.textContent = "剧本改造失败，请稍后重试。";
-      adaptButton.disabled = false;
+      storyboardParseStatus.textContent = "文件读取失败，请稍后重试。";
+    } finally {
+      storyboardUploadInput.value = "";
+    }
+  }
+
+  async function parseManualStoryboardScript() {
+    if (!storyboardManualInput || !storyboardParseButton || !storyboardParseStatus) {
+      return;
+    }
+    const rawText = storyboardManualInput.value.trim();
+    if (!rawText) {
+      storyboardParseStatus.textContent = "请先输入或上传分镜剧本。";
+      return;
+    }
+    storyboardParseButton.disabled = true;
+    storyboardParseStatus.textContent = "正在解析...";
+    try {
+      const response = await fetch(`/api/script/generations/${encodeURIComponent(generationId)}/storyboard-script/parse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw_text: rawText }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        storyboardParseStatus.textContent = payload.error || "解析失败";
+        storyboardParseButton.disabled = false;
+        return;
+      }
+      storyboardParseStatus.textContent = "已解析，正在刷新...";
+      window.setTimeout(() => window.location.reload(), 300);
+    } catch (error) {
+      storyboardParseStatus.textContent = "解析失败，请稍后重试。";
+      storyboardParseButton.disabled = false;
     }
   }
 
@@ -692,15 +737,20 @@
     ragStatus.textContent = "已放入编辑框预览，保存前请人工检查。";
   }
 
-  editStart.addEventListener("click", () => setEditMode(true));
-  editCancel.addEventListener("click", () => {
-    editor.value = editor.defaultValue;
-    editStatus.textContent = "";
-    setEditMode(false);
-  });
-  editSave.addEventListener("click", saveArticle);
-  if (adaptButton) {
-    adaptButton.addEventListener("click", adaptStoryboardScript);
+  if (editStart && editCancel && editSave && editor && editStatus) {
+    editStart.addEventListener("click", () => setEditMode(true));
+    editCancel.addEventListener("click", () => {
+      editor.value = editor.defaultValue;
+      editStatus.textContent = "";
+      setEditMode(false);
+    });
+    editSave.addEventListener("click", saveArticle);
+  }
+  if (storyboardParseButton) {
+    storyboardParseButton.addEventListener("click", parseManualStoryboardScript);
+  }
+  if (storyboardUploadInput) {
+    storyboardUploadInput.addEventListener("change", uploadStoryboardScriptFile);
   }
   if (assistantEnabled) {
     conversationNew.addEventListener("click", () => createConversation("新对话", { load: true }));

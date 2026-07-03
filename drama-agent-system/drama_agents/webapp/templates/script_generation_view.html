@@ -22,11 +22,11 @@
       </header>
 
       {% set storyboard_script = generation.script.storyboard_script or {} %}
-      {% set has_storyboard_script = storyboard_script.adapted_article %}
+      {% set is_manual_storyboard_script = storyboard_script.format == "manual_storyboard_script" %}
+      {% set has_storyboard_script = is_manual_storyboard_script and storyboard_script.adapted_article %}
       <nav class="script-page-tabs" aria-label="剧本生成查看器">
         <a class="{% if section == 'script' %}active{% endif %}" href="/script-generations/{{ generation.generation_id }}/script">剧本</a>
-        <a class="{% if not has_storyboard_script %}disabled{% endif %}" data-storyboard-script-link aria-disabled="{% if has_storyboard_script %}false{% else %}true{% endif %}" {% if has_storyboard_script %}href="/#storyboard"{% endif %}>分镜剧本</a>
-        <button class="text-button" type="button" data-script-adapt>{% if has_storyboard_script %}再次改造{% else %}剧本改造{% endif %}</button>
+        <a class="{% if section == 'storyboard-script' %}active{% endif %}" data-storyboard-script-link aria-disabled="false" href="/script-generations/{{ generation.generation_id }}/storyboard-script">分镜剧本</a>
       </nav>
 
       {% if section == "script" %}
@@ -96,28 +96,114 @@
                 </section>
               {% endif %}
             </section>
+          </div>
+        </article>
+      {% elif section == "storyboard-script" %}
+        <article class="script-reader-page script-storyboard-reader" data-script-reader="{{ generation.generation_id }}">
+          <h2>{% if has_storyboard_script %}{{ storyboard_script.title }}{% else %}{{ generation.script.title or generation.topic }}{% endif %}</h2>
+          {% if has_storyboard_script and storyboard_script.episode_structure and storyboard_script.episode_structure.main_question %}
+            <p class="script-logline">{{ storyboard_script.episode_structure.main_question }}</p>
+          {% elif generation.script.logline %}
+            <p class="script-logline">{{ generation.script.logline }}</p>
+          {% endif %}
 
-            <aside class="script-storyboard-panel">
-              <div class="script-editor-toolbar">
-                <h3>分镜剧本</h3>
-              </div>
-              <section class="script-article-card script-storyboard-card" data-storyboard-script-display>
-                {% if has_storyboard_script %}
-                  {% for paragraph in storyboard_script.adapted_article.split("\n\n") %}
-                    {% if paragraph.strip() %}
-                      <p>{{ paragraph }}</p>
-                    {% endif %}
-                  {% endfor %}
-                {% else %}
-                  <p class="muted-text">尚未生成分镜剧本。</p>
-                {% endif %}
+          <div class="script-reader-workspace">
+            <section class="script-reader-main">
+              <section class="script-storyboard-import">
+                <div class="script-storyboard-dropbox">
+                  <textarea class="script-storyboard-input" data-storyboard-manual-input></textarea>
+                  <div class="script-storyboard-actions">
+                    <label class="storyboard-upload-button">
+                      <span>上传</span>
+                      <input data-storyboard-upload type="file" accept=".txt,.md,.markdown,.pdf,.doc,.docx,text/plain,text/markdown,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" hidden>
+                    </label>
+                    <button class="storyboard-parse-button" type="button" data-storyboard-parse>解析</button>
+                  </div>
+                </div>
+                <div class="script-editor-status" data-storyboard-parse-status></div>
               </section>
-              {% if storyboard_script.adapted_segments %}
+
+              <section class="script-storyboard-output">
+                <div class="script-editor-toolbar">
+                  <h3>完整分镜剧本</h3>
+                </div>
+                <section class="script-article-card script-storyboard-card" data-storyboard-script-display>
+                  {% if has_storyboard_script %}
+                    {% if storyboard_script.scene_script %}
+                      {% for scene in storyboard_script.scene_script %}
+                        <article class="storyboard-readable-scene">
+                          <h3>{{ scene.scene_id }}｜{{ scene.scene_title }}</h3>
+                          <dl>
+                            <div><dt>场景类型</dt><dd>{{ scene.scene_type }}</dd></div>
+                            <div><dt>功能</dt><dd>{{ scene.beat_function }}</dd></div>
+                            <div><dt>时长</dt><dd>{{ scene.duration_sec }} 秒</dd></div>
+                            <div><dt>源稿</dt><dd>{% for atom in scene.source_atoms %}[{{ atom }}]{% if not loop.last %} {% endif %}{% else %}无{% endfor %}</dd></div>
+                          </dl>
+                          <section>
+                            <h4>讲述人旁白</h4>
+                            {% for line in scene.narrator_lines %}
+                              <p>{{ line }}</p>
+                            {% else %}
+                              <p>无。</p>
+                            {% endfor %}
+                          </section>
+                          <section>
+                            <h4>画面演绎</h4>
+                            {% set visual = scene.visual_layer or {} %}
+                            {% if visual.main_visual %}
+                              <p>{{ visual.main_visual }}</p>
+                            {% else %}
+                              <p>无。</p>
+                            {% endif %}
+                          </section>
+                          <section>
+                            <h4>屏幕文字</h4>
+                            {% for item in scene.screen_text %}
+                              <p>{{ item }}</p>
+                            {% else %}
+                              <p>无。</p>
+                            {% endfor %}
+                          </section>
+                          <section>
+                            <h4>历史人物对白</h4>
+                            {% for item in scene.historical_character_dialogue %}
+                              <p>{{ item.speaker }}：{{ item.line }}</p>
+                            {% else %}
+                              <p>无。</p>
+                            {% endfor %}
+                          </section>
+                          <section>
+                            <h4>保留支撑点</h4>
+                            {% set knowledge = scene.knowledge_payload or {} %}
+                            {% for item in knowledge.must_keep_details %}
+                              <p>{{ item }}</p>
+                            {% else %}
+                              <p>无。</p>
+                            {% endfor %}
+                          </section>
+                        </article>
+                      {% endfor %}
+                    {% else %}
+                      {% for paragraph in storyboard_script.adapted_article.split("\n\n") %}
+                        {% if paragraph.strip() %}
+                          <p>{{ paragraph }}</p>
+                        {% endif %}
+                      {% endfor %}
+                    {% endif %}
+                  {% else %}
+                    <p class="script-storyboard-empty">暂未解析</p>
+                  {% endif %}
+                </section>
+              </section>
+              {% if has_storyboard_script and storyboard_script.adapted_segments %}
                 <section class="script-structure-card script-storyboard-segments">
                   <h3>分镜段落</h3>
                   {% for segment in storyboard_script.adapted_segments %}
                     <article>
                       <strong>{{ segment.dramatic_function or segment.segment_id }}</strong>
+                      {% if segment.voiceover %}
+                        <p>{{ segment.voiceover }}</p>
+                      {% endif %}
                       <p>{{ segment.visual_progression or segment.visual_goal }}</p>
                       {% if segment.scene_intent %}
                         <span>{{ segment.scene_intent }}</span>
@@ -126,13 +212,12 @@
                   {% endfor %}
                 </section>
               {% endif %}
-              <div class="script-editor-status" data-script-adapt-status></div>
-            </aside>
+            </section>
           </div>
         </article>
       {% endif %}
     </main>
-    {% if section == "script" %}
+    {% if section in ["script", "storyboard-script"] %}
       <script src="{{ url_for('static', filename='script_reader.js') }}?v=20260630a"></script>
     {% endif %}
   </body>
