@@ -8,6 +8,9 @@
   </head>
   <body>
     {% set coverage = storyboard.coverage or {} %}
+    {% set raw_payload = storyboard.raw or {} %}
+    {% set reconstruction_payload = raw_payload.get("scene_reconstruction") or {} %}
+    {% set reconstruction_scenes = raw_payload.get("scenes") or reconstruction_payload.get("scenes") or [] %}
     {% set scene_blocks = storyboard.scene_blocks or [] %}
     {% set uncovered_paragraphs = coverage.get("uncovered_paragraphs") or [] %}
     {% set covered_paragraph_count = coverage.get("covered_paragraph_count", 0) or 0 %}
@@ -73,6 +76,118 @@
           <small>{{ storyboard.status }}</small>
         </article>
       </section>
+
+      {% if reconstruction_scenes %}
+      <section class="storyboard-reconstruction-report">
+        <div class="storyboard-reconstruction-head">
+          <div>
+            <span>分镜重构报告</span>
+            <strong>{{ reconstruction_scenes|length }} 个 Scene</strong>
+          </div>
+          <em>Scene -> Keyframes -> Segments -> Bridge</em>
+        </div>
+        <div class="storyboard-reconstruction-scenes">
+          {% for scene in reconstruction_scenes %}
+          {% set decision = scene.reconstruction_decision or {} %}
+          {% set bridge = scene.inter_scene_bridge or {} %}
+          {% set validation = scene.validation or {} %}
+          <article class="storyboard-reconstruction-scene">
+            <header>
+              <div>
+                <strong>{{ scene.scene_id }}｜{{ scene.title }}</strong>
+                <span>{{ scene.duration_sec }} 秒 · {{ scene.scene_type|join(" + ") }}</span>
+              </div>
+              <div class="storyboard-reconstruction-chips">
+                <small>{{ decision.segment_count or 0 }} Segments</small>
+                <small>{{ decision.keyframe_count or 0 }} Keyframes</small>
+                <small>{{ bridge.strategy or decision.bridge_strategy or "DIRECT_CUT" }}</small>
+              </div>
+            </header>
+            <p>{{ decision.reason }}</p>
+            {% if validation.issues %}
+            <div class="storyboard-reconstruction-issues">
+              {% for issue in validation.issues %}
+              <span>{{ issue }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
+
+            <section class="storyboard-reconstruction-section">
+              <h3>Keyframes</h3>
+              <div class="storyboard-reconstruction-keyframes">
+                {% for keyframe in scene.keyframes or [] %}
+                <article>
+                  <div class="storyboard-reconstruction-card-head">
+                    <strong>{{ keyframe.keyframe_id }}</strong>
+                    <span>{{ keyframe.time_sec }}s · {{ keyframe.frame_role }}</span>
+                  </div>
+                  <p>{{ keyframe.visual_content }}</p>
+                  {% if keyframe.screen_text %}
+                  <div class="storyboard-reconstruction-chips">
+                    {% for text in keyframe.screen_text %}
+                    <small>{{ text }}</small>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                  <div class="storyboard-reconstruction-prompt">
+                    <div>
+                      <span>keyframe_prompt</span>
+                      <button type="button" data-reconstruction-copy data-copy-target="prompt-{{ keyframe.keyframe_id }}">复制</button>
+                    </div>
+                    <pre id="prompt-{{ keyframe.keyframe_id }}">{{ keyframe.keyframe_prompt }}</pre>
+                  </div>
+                  <div class="storyboard-reconstruction-prompt">
+                    <div>
+                      <span>negative_prompt</span>
+                      <button type="button" data-reconstruction-copy data-copy-target="negative-{{ keyframe.keyframe_id }}">复制</button>
+                    </div>
+                    <pre id="negative-{{ keyframe.keyframe_id }}">{{ keyframe.negative_prompt }}</pre>
+                  </div>
+                </article>
+                {% endfor %}
+              </div>
+            </section>
+
+            <section class="storyboard-reconstruction-section">
+              <h3>Segments</h3>
+              <div class="storyboard-reconstruction-segments">
+                {% for segment in scene.segments or [] %}
+                {% set connection = segment.connection or {} %}
+                <article>
+                  <div class="storyboard-reconstruction-card-head">
+                    <strong>{{ segment.segment_id }}</strong>
+                    <span>{{ segment.start_sec }}s - {{ segment.end_sec }}s · {{ connection.type or segment.transition_type }}</span>
+                  </div>
+                  <small>{{ segment.from_keyframe_id }} -> {{ segment.to_keyframe_id }}</small>
+                  <p>{{ segment.visual_action }}</p>
+                  {% if segment.narration_range and segment.narration_range.full_text %}
+                  <em>{{ segment.narration_range.full_text }}</em>
+                  {% endif %}
+                  {% if segment.screen_text %}
+                  <div class="storyboard-reconstruction-chips">
+                    {% for item in segment.screen_text %}
+                    <small>{{ item.text }}</small>
+                    {% endfor %}
+                  </div>
+                  {% endif %}
+                </article>
+                {% endfor %}
+              </div>
+            </section>
+
+            <section class="storyboard-reconstruction-section">
+              <h3>Bridge</h3>
+              <div class="storyboard-reconstruction-bridge">
+                <strong>{{ "需要桥接" if bridge.needed else "直接衔接" }}</strong>
+                <span>{{ bridge.strategy or decision.bridge_strategy or "DIRECT_CUT" }}</span>
+                <p>{{ bridge.reason or decision.reason }}</p>
+              </div>
+            </section>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
 
       {% if scene_blocks %}
       <section class="storyboard-scene-block-strip">
@@ -320,6 +435,29 @@
       const keyframeProgressList = document.querySelector("#storyboardKeyframeProgressList");
       let activeShotId = shots[0] ? shots[0].shot_id : "";
       const preparationStateByShot = {};
+
+      document.querySelectorAll("[data-reconstruction-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const target = document.getElementById(button.dataset.copyTarget || "");
+          const text = target ? target.textContent.trim() : "";
+          if (!text) return;
+          try {
+            await navigator.clipboard.writeText(text);
+            button.textContent = "已复制";
+            window.setTimeout(() => {
+              button.textContent = "复制";
+            }, 1200);
+          } catch (error) {
+            const fallback = document.createElement("textarea");
+            fallback.value = text;
+            document.body.appendChild(fallback);
+            fallback.select();
+            document.execCommand("copy");
+            fallback.remove();
+            button.textContent = "已复制";
+          }
+        });
+      });
 
       function escapeHtml(value) {
         return String(value || "")
@@ -811,14 +949,14 @@
       });
       batchKeyframeButton.addEventListener("click", runBatchKeyframes);
       document.querySelector("#deleteStoryboardButton").addEventListener("click", async () => {
-        if (!window.confirm("删除这条分镜记录？")) return;
+        if (!window.confirm("删除这条镜头生产记录？")) return;
         const response = await fetch(`/api/storyboards/${encodeURIComponent(storyboard.storyboard_id)}`, { method: "DELETE" });
         if (response.ok) {
           window.location.href = "/#scene";
         }
       });
       document.querySelector("#regenerateStoryboardButton").addEventListener("click", async () => {
-        editorStatus.textContent = "正在重新生成分镜...";
+        editorStatus.textContent = "正在重新生成镜头生产结构...";
         const response = await fetch(`/api/script/generations/${encodeURIComponent(storyboard.generation_id)}/storyboard/generate`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },

@@ -799,7 +799,7 @@ class MaterialDatabase:
         normalized = {
             "storyboard_id": storyboard_id,
             "generation_id": generation_id,
-            "title": str(payload.get("title") or "剧本分镜"),
+            "title": str(payload.get("title") or "镜头生产结构"),
             "source_type": str(payload.get("source_type") or "script_generation"),
             "source_filename": str(payload.get("source_filename") or ""),
             "status": status,
@@ -2501,6 +2501,14 @@ def storyboard_from_row(row: sqlite3.Row) -> dict[str, Any]:
             "raw": raw,
         }
     )
+    reconstruction = raw.get("scene_reconstruction") if isinstance(raw.get("scene_reconstruction"), dict) else {}
+    if reconstruction:
+        storyboard["reconstruction_id"] = reconstruction.get("reconstruction_id") or storyboard.get("reconstruction_id", "")
+        storyboard["scene_count"] = reconstruction.get("scene_count") or len(reconstruction.get("scenes") or [])
+        storyboard["segment_count"] = reconstruction.get("segment_count") or sum(len(scene.get("segments") or []) for scene in reconstruction.get("scenes") or [])
+        storyboard["keyframe_count"] = reconstruction.get("keyframe_count") or sum(len(scene.get("keyframes") or []) for scene in reconstruction.get("scenes") or [])
+        storyboard["json_path"] = reconstruction.get("json_path") or storyboard.get("json_path", "")
+        storyboard["markdown_path"] = reconstruction.get("markdown_path") or storyboard.get("markdown_path", "")
     if not storyboard["script_title"]:
         storyboard["script_title"] = storyboard.get("topic") or storyboard.get("title") or ""
     return storyboard

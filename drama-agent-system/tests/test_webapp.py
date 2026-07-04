@@ -8,6 +8,7 @@ from pypdf import PdfWriter
 from tests.test_material_splitter import create_minimal_docx
 
 from drama_agents.storage import MaterialDatabase
+from drama_agents.shot_production_agent import ShotProductionAgent
 from drama_agents.storyboard_agent import RuleBasedStoryboardProvider
 from drama_agents.vector_store import LocalVectorStore
 from drama_agents.visual_scene_agent import (
@@ -314,7 +315,7 @@ def test_homepage_renders_scene_builder_workspace(tmp_path):
     assert "场景搭建" in html
     assert "主体池" in html
     assert "场景池" in html
-    assert "剧本分镜" in html
+    assert "分镜重构" in html
     assert "选择已有剧本" in html
     assert "解析主体" in html
     assert "管理短剧中需要保持视觉一致的环境空间" in html
@@ -323,7 +324,7 @@ def test_homepage_renders_scene_builder_workspace(tmp_path):
     assert "storyboardUploadButton" in html
     assert "storyboardSelectButton" in html
     assert "storyboardGenerateButton" in html
-    assert "分镜记录" in html
+    assert "镜头生产记录" in html
 
 
 def test_subject_pool_renders_asset_workbench_layout(tmp_path):
@@ -901,7 +902,7 @@ def test_script_generation_dedicated_view_pages_render_saved_sections(tmp_path):
     ]
     assert "剧本阅读器" in script_html
     assert 'data-script-reader="' in script_html
-    assert "分镜剧本" in tabs_html
+    assert "镜头生产稿" in tabs_html
     assert f'href="/script-generations/{generation_id}/storyboard-script"' in tabs_html
     assert 'data-storyboard-script-link aria-disabled="false"' in tabs_html
     assert "data-script-adapt" not in tabs_html
@@ -974,7 +975,7 @@ def test_script_adaptation_generates_storyboard_script_and_updates_reader(tmp_pa
     storyboard_tabs_html = storyboard_html[
         storyboard_html.index('<nav class="script-page-tabs"') : storyboard_html.index("</nav>", storyboard_html.index('<nav class="script-page-tabs"'))
     ]
-    assert "分镜剧本阅读器" in storyboard_html
+    assert "镜头生产稿阅读器" in storyboard_html
     assert '<a class="active" data-storyboard-script-link' in storyboard_tabs_html
     assert "分镜剧本旁白第一段" not in storyboard_html
     assert "开场钩子" not in storyboard_html
@@ -1102,6 +1103,7 @@ def test_storyboard_generation_uses_adapted_storyboard_script(tmp_path):
         timeline_provider=FakeTimelineProvider(),
         script_provider=script_provider,
         storyboard_provider=storyboard_provider,
+        shot_production_agent=ShotProductionAgent(),
     )
     client = app.test_client()
     generation = create_generated_script(client)
@@ -1110,9 +1112,137 @@ def test_storyboard_generation_uses_adapted_storyboard_script(tmp_path):
     response = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard/generate")
 
     assert response.status_code == 200
-    assert storyboard_provider.payload["full_script"].startswith("分镜剧本旁白第一段")
-    assert storyboard_provider.payload["adapted_segments"][0]["segment_id"] == "seg-001"
-    assert response.get_json()["storyboard"]["source_type"] == "storyboard_script"
+    payload = response.get_json()
+    assert storyboard_provider.payload is None
+    assert payload["storyboard"]["source_type"] == "standard_storyboard_script"
+    assert payload["shots"][0]["keyframe_prompt"]
+
+
+def test_storyboard_generation_uses_standard_storyboard_script_as_production_source(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    storyboard_provider = CapturingStoryboardProvider()
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+        storyboard_provider=storyboard_provider,
+        shot_production_agent=ShotProductionAgent(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    raw_text = """
+S01｜开场：地球上最会讲故事的动物
+
+场景类型： HOST_OPENING + SYMBOLIC_MONTAGE
+功能： 开场钩子 / 提出核心问题
+时长： 25 秒
+源稿： [1]
+
+讲述人旁白
+
+早在 7 万年前，非洲东部的稀树草原上，生活着一群看起来很不起眼的动物。
+
+他们是怎么办到的？
+
+画面演绎
+
+地球从太空中缓慢旋转，镜头推进到非洲大陆，再落到东非稀树草原。
+草丛里，一群瘦弱的早期智人小心移动。
+画面突然快闪：火箭升空、潜水器下潜、城市夜景、卫星环绕地球。
+最后全部画面缩回虚拟老师身后的黑板，黑板上写着：翻盘技能：讲故事
+
+屏幕文字
+7 万年前
+非洲东部
+智人：开局很弱
+他们靠什么翻盘？
+
+保留支撑点
+智人一开始并不强。
+用登月、探海制造巨大反差。
+本集核心问题：弱小智人为什么能改变地球？
+""".strip()
+    parse_response = client.post(
+        f"/api/script/generations/{generation['generation_id']}/storyboard-script/parse",
+        json={"raw_text": raw_text},
+    )
+
+    assert parse_response.status_code == 200
+    response = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard/generate")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert storyboard_provider.payload is None
+    assert payload["storyboard"]["source_type"] == "standard_storyboard_script"
+    assert payload["storyboard"]["shot_count"] >= 4
+    assert payload["storyboard"]["scene_blocks"][0]["scene_block_id"] == "S01"
+    assert all(shot["scene_block_id"] == "S01" for shot in payload["shots"])
+    assert all("这是单张关键帧" in shot["keyframe_prompt"] for shot in payload["shots"])
+    assert not any(shot["narration"] == "讲述人旁白" for shot in payload["shots"])
+
+
+def test_storyboard_detail_renders_scene_reconstruction_sections(tmp_path):
+    library = tmp_path / "资料库"
+    library.mkdir()
+    create_pdf(library / "demo.pdf")
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        refiner_provider=FakeDeepSeekProvider(),
+        timeline_provider=FakeTimelineProvider(),
+        script_provider=FakeScriptProvider(),
+        storyboard_provider=CapturingStoryboardProvider(),
+        shot_production_agent=ShotProductionAgent(),
+    )
+    client = app.test_client()
+    generation = create_generated_script(client)
+    raw_text = """
+S01｜开场：地球上最会讲故事的动物
+
+场景类型： HOST_OPENING + SYMBOLIC_MONTAGE
+功能： 开场钩子 / 提出核心问题
+时长： 25 秒
+源稿： [1]
+
+讲述人旁白
+
+早在 7 万年前，非洲东部的稀树草原上，生活着一群看起来很不起眼的动物。
+
+画面演绎
+
+地球从太空中缓慢旋转，镜头推进到非洲大陆，再落到东非稀树草原。
+画面突然快闪：火箭升空、潜水器下潜、城市夜景、卫星环绕地球。
+最后全部画面缩回虚拟老师身后的黑板。
+
+屏幕文字
+7 万年前
+非洲东部
+他们靠什么翻盘？
+
+保留支撑点
+本集核心问题：弱小智人为什么能改变地球？
+""".strip()
+    client.post(
+        f"/api/script/generations/{generation['generation_id']}/storyboard-script/parse",
+        json={"raw_text": raw_text},
+    )
+    created = client.post(f"/api/script/generations/{generation['generation_id']}/storyboard/generate").get_json()
+    assert created["storyboard"]["scene_count"] == 1
+    assert created["storyboard"]["segment_count"] >= 4
+    assert created["storyboard"]["keyframe_count"] >= 5
+
+    html = client.get(f"/storyboards/{created['storyboard']['storyboard_id']}").get_data(as_text=True)
+
+    assert "分镜重构报告" in html
+    assert "Keyframes" in html
+    assert "Segments" in html
+    assert "Bridge" in html
+    assert "data-reconstruction-copy" in html
+    assert "DIRECT_CUT" in html
 
 
 def app_with_generated_script(tmp_path):

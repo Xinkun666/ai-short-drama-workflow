@@ -26,7 +26,7 @@
       {% set has_storyboard_script = is_manual_storyboard_script and storyboard_script.adapted_article %}
       <nav class="script-page-tabs" aria-label="剧本生成查看器">
         <a class="{% if section == 'script' %}active{% endif %}" href="/script-generations/{{ generation.generation_id }}/script">剧本</a>
-        <a class="{% if section == 'storyboard-script' %}active{% endif %}" data-storyboard-script-link aria-disabled="false" href="/script-generations/{{ generation.generation_id }}/storyboard-script">分镜剧本</a>
+        <a class="{% if section == 'storyboard-script' %}active{% endif %}" data-storyboard-script-link aria-disabled="false" href="/script-generations/{{ generation.generation_id }}/storyboard-script">镜头生产稿</a>
       </nav>
 
       {% if section == "script" %}
@@ -125,7 +125,7 @@
 
               <section class="script-storyboard-output">
                 <div class="script-editor-toolbar">
-                  <h3>完整分镜剧本</h3>
+                  <h3>完整镜头生产稿</h3>
                 </div>
                 <section class="script-article-card script-storyboard-card" data-storyboard-script-display>
                   {% if has_storyboard_script %}
@@ -197,7 +197,7 @@
               </section>
               {% if has_storyboard_script and storyboard_script.adapted_segments %}
                 <section class="script-structure-card script-storyboard-segments">
-                  <h3>分镜段落</h3>
+                  <h3>镜头生产段落</h3>
                   {% for segment in storyboard_script.adapted_segments %}
                     <article>
                       <strong>{{ segment.dramatic_function or segment.segment_id }}</strong>

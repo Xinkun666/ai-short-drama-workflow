@@ -3966,6 +3966,154 @@ th {
   line-height: 1.1;
 }
 
+.storyboard-reconstruction-report {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #dce8e1;
+  border-radius: 10px;
+  background: #ffffff;
+  margin-bottom: 16px;
+  padding: 12px;
+}
+
+.storyboard-reconstruction-head,
+.storyboard-reconstruction-scene > header,
+.storyboard-reconstruction-card-head,
+.storyboard-reconstruction-prompt > div,
+.storyboard-reconstruction-bridge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.storyboard-reconstruction-head div,
+.storyboard-reconstruction-scene > header > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.storyboard-reconstruction-head span,
+.storyboard-reconstruction-head em,
+.storyboard-reconstruction-scene span,
+.storyboard-reconstruction-scene small,
+.storyboard-reconstruction-scene em,
+.storyboard-reconstruction-prompt span,
+.storyboard-reconstruction-bridge span {
+  color: #6b7280;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 760;
+  line-height: 1.45;
+}
+
+.storyboard-reconstruction-head strong,
+.storyboard-reconstruction-scene strong,
+.storyboard-reconstruction-section h3 {
+  color: #1f2937;
+}
+
+.storyboard-reconstruction-head strong {
+  font-size: 16px;
+}
+
+.storyboard-reconstruction-scenes,
+.storyboard-reconstruction-scene,
+.storyboard-reconstruction-section,
+.storyboard-reconstruction-keyframes,
+.storyboard-reconstruction-segments {
+  display: grid;
+  gap: 10px;
+}
+
+.storyboard-reconstruction-scene {
+  border: 1px solid #e5ebe7;
+  border-radius: 8px;
+  background: #f8fbf9;
+  padding: 11px;
+}
+
+.storyboard-reconstruction-scene p,
+.storyboard-reconstruction-bridge p {
+  margin: 0;
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.storyboard-reconstruction-chips,
+.storyboard-reconstruction-issues {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.storyboard-reconstruction-chips small,
+.storyboard-reconstruction-issues span {
+  border-radius: 999px;
+  background: #eef5f0;
+  color: #52605a;
+  font-size: 11px;
+  font-weight: 820;
+  padding: 3px 7px;
+}
+
+.storyboard-reconstruction-issues span {
+  background: #fef9c3;
+  color: #854d0e;
+}
+
+.storyboard-reconstruction-section h3 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.storyboard-reconstruction-keyframes,
+.storyboard-reconstruction-segments {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.storyboard-reconstruction-keyframes article,
+.storyboard-reconstruction-segments article,
+.storyboard-reconstruction-bridge {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #e5ebe7;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.storyboard-reconstruction-prompt {
+  display: grid;
+  gap: 5px;
+}
+
+.storyboard-reconstruction-prompt button {
+  border: 1px solid #d8e4dd;
+  border-radius: 999px;
+  background: #ffffff;
+  color: var(--green-dark);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 860;
+  padding: 4px 8px;
+}
+
+.storyboard-reconstruction-prompt pre {
+  max-height: 150px;
+  overflow: auto;
+  margin: 0;
+  border-radius: 8px;
+  background: #f3f7f5;
+  color: #374151;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .storyboard-scene-block-strip {
   display: grid;
   gap: 10px;

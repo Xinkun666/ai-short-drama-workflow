@@ -4,6 +4,7 @@ import json
 from io import BytesIO
 
 from drama_agents.storage import MaterialDatabase
+from drama_agents.shot_production_agent import ShotProductionAgent
 from drama_agents.storyboard_agent import DeepSeekStoryboardProvider, RuleBasedStoryboardProvider, StoryboardAgent
 from drama_agents.visual_anchor_agent import build_subject_anchor_prompt
 from drama_agents.webapp.app import create_app
@@ -764,21 +765,50 @@ def test_storyboard_api_falls_back_when_provider_returns_malformed_json(tmp_path
 
 
 def test_storyboard_upload_script(tmp_path):
-    app = create_app(workspace=tmp_path, outputs=tmp_path / "outputs", storyboard_provider=RuleBasedStoryboardProvider())
+    app = create_app(
+        workspace=tmp_path,
+        outputs=tmp_path / "outputs",
+        storyboard_provider=RuleBasedStoryboardProvider(),
+        shot_production_agent=ShotProductionAgent(),
+    )
     client = app.test_client()
+    standard_storyboard = """
+S01｜红海迁徙渡口
+
+场景类型： HISTORICAL_REENACTMENT + MAP_ANIMATION
+功能： 展示迁徙节点
+时长： 20 秒
+源稿： [1]
+
+讲述人旁白
+
+智人来到索马里一侧的红海海口，望向阿拉伯半岛。
+
+画面演绎
+
+索马里一侧的红海海口出现迁徙队伍，远处是阿拉伯半岛。地图线条从非洲东北部跨过红海。
+
+屏幕文字
+红海海口
+走出非洲
+
+保留支撑点
+智人跨过红海望向阿拉伯半岛。
+""".strip()
 
     response = client.post(
         "/api/storyboards/extract-from-upload",
-        data={"file": (BytesIO("智人开局。\n\n索马里红海海口迁徙。".encode("utf-8")), "uploaded.md")},
+        data={"file": (BytesIO(standard_storyboard.encode("utf-8")), "uploaded.md")},
         content_type="multipart/form-data",
     )
 
     assert response.status_code == 200
     payload = response.get_json()
     assert payload["generation"]["generation_id"].startswith("uploaded-script-")
-    assert payload["storyboard"]["source_type"] == "upload"
+    assert payload["storyboard"]["source_type"] == "standard_storyboard_script"
     assert payload["storyboard"]["source_filename"] == "uploaded.md"
     assert payload["shots"]
+    assert all(shot["keyframe_prompt"] for shot in payload["shots"])
 
 
 def test_storyboard_delete(tmp_path):
@@ -882,10 +912,10 @@ def test_storyboard_panel_renders_operation_area_and_records(tmp_path):
     assert "60 秒" not in html
     assert "90 秒" not in html
     assert "120 秒" not in html
-    assert 'id="storyboardUploadButton" type="button">上传剧本' in html
+    assert 'id="storyboardUploadButton" type="button">上传标准稿' in html
     assert 'id="storyboardSelectButton" type="button">选择剧本' in html
-    assert 'id="storyboardGenerateButton" type="button">解析' in html
-    assert "分镜记录" in html
+    assert 'id="storyboardGenerateButton" type="button">解析生产稿' in html
+    assert "镜头生产记录" in html
     assert "scene-placeholder" not in html
 
 

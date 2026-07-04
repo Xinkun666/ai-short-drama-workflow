@@ -2065,12 +2065,15 @@ def parse_manual_storyboard_scene(scene_id: str, scene_title: str, body: str, in
     metadata: dict[str, str] = {}
     sections: dict[str, list[str]] = {value: [] for value in MANUAL_STORYBOARD_SECTION_TITLES.values()}
     current_section = ""
+    pending_metadata_key = ""
+    metadata_keys = {"场景类型", "功能", "时长", "源稿"}
     for raw_line in normalize_line_endings(body).splitlines():
         line = raw_line.strip()
         if not line:
             continue
         if line in MANUAL_STORYBOARD_SECTION_TITLES:
             current_section = MANUAL_STORYBOARD_SECTION_TITLES[line]
+            pending_metadata_key = ""
             continue
         if current_section:
             sections[current_section].append(line)
@@ -2078,6 +2081,14 @@ def parse_manual_storyboard_scene(scene_id: str, scene_title: str, body: str, in
         key, value = split_manual_metadata_line(line)
         if key:
             metadata[key] = value
+            pending_metadata_key = ""
+            continue
+        if pending_metadata_key:
+            metadata[pending_metadata_key] = line
+            pending_metadata_key = ""
+            continue
+        if line in metadata_keys:
+            pending_metadata_key = line
 
     support_lines = sections["support"]
     scene_type = metadata.get("场景类型", "") or "HOST_EXPLANATION"

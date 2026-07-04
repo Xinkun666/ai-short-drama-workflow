@@ -1333,14 +1333,14 @@ function clearStoryboardTimers() {
 function scheduleStoryboardSteps() {
   clearStoryboardTimers();
   const steps = [
-    "正在读取剧本",
+    "正在读取标准镜头生产稿",
     "正在读取主体池",
     "正在读取场景池",
-    "正在划分主场景",
-    "正在生成主场景内关键帧",
-    "正在绑定主体、场景和字幕",
+    "正在重构镜头分段",
+    "正在判断关键帧边界",
+    "正在判断硬切或连续生成方式",
     "正在生成关键帧提示词",
-    "正在保存分镜",
+    "正在保存分镜重构结构",
   ];
   steps.forEach((step, index) => {
     state.storyboardTimers.push(
@@ -1374,7 +1374,7 @@ async function generateStoryboard() {
         body: JSON.stringify({}),
       });
     }
-    const payload = await readJsonResponse(response, "分镜解析失败");
+    const payload = await readJsonResponse(response, "镜头生产稿解析失败");
     clearStoryboardTimers();
     state.storyboardUploadedFile = null;
     if (elements.storyboardUploadInput) {
@@ -1383,7 +1383,7 @@ async function generateStoryboard() {
     state.selectedStoryboardScriptId = payload.generation.generation_id;
     updateStoryboardScriptInput();
     await Promise.all([loadScriptGenerations(), loadStoryboards()]);
-    setStoryboardStatus(`解析完成：生成 ${payload.storyboard.shot_count || 0} 个镜头。`, "success");
+    setStoryboardStatus(`解析完成：生成 ${payload.storyboard.scene_count || 0} 个场景、${payload.storyboard.keyframe_count || payload.storyboard.shot_count || 0} 个关键帧任务。`, "success");
   } catch (error) {
     clearStoryboardTimers();
     setStoryboardStatus(error.message, "error");
@@ -1395,7 +1395,7 @@ async function generateStoryboard() {
 async function loadStoryboards() {
   if (!elements.storyboardRecordsList) return;
   const response = await fetch("/api/storyboards");
-  const payload = await readJsonResponse(response, "分镜记录读取失败");
+  const payload = await readJsonResponse(response, "镜头生产记录读取失败");
   state.storyboards = payload.storyboards || [];
   renderStoryboardRecords();
 }
@@ -1403,7 +1403,7 @@ async function loadStoryboards() {
 function renderStoryboardRecords() {
   if (!elements.storyboardRecordsList) return;
   if (!state.storyboards.length) {
-    elements.storyboardRecordsList.innerHTML = '<div class="visual-empty-state compact"><strong>暂无分镜记录</strong><span>选择剧本并点击“解析”。</span></div>';
+    elements.storyboardRecordsList.innerHTML = '<div class="visual-empty-state compact"><strong>暂无镜头生产记录</strong><span>选择已附标准稿的剧本，或上传标准稿后点击解析。</span></div>';
     return;
   }
   elements.storyboardRecordsList.innerHTML = state.storyboards
@@ -1456,7 +1456,7 @@ async function deleteStoryboardRecord(storyboardId) {
   const payload = await readJsonResponse(response, "删除分镜失败");
   state.storyboards = payload.storyboards || [];
   renderStoryboardRecords();
-  setStoryboardStatus("分镜记录已删除。", "success");
+  setStoryboardStatus("镜头生产记录已删除。", "success");
 }
 
 function setSceneBuilderTab(tabName) {
@@ -2156,8 +2156,8 @@ elements.storyboardUploadInput.addEventListener("change", () => {
   if (!file) return;
   state.storyboardUploadedFile = file;
   updateStoryboardScriptInput();
-  elements.storyboardAssetSummary.textContent = "上传剧本 · 主体 0 个 · 场景 0 个";
-  setStoryboardStatus("已选择上传剧本，点击“解析”生成分镜。", "success");
+  elements.storyboardAssetSummary.textContent = "上传标准稿 · 主体 0 个 · 场景 0 个";
+  setStoryboardStatus("已选择标准镜头生产稿，点击“解析生产稿”生成结构。", "success");
 });
 elements.storyboardSelectButton.addEventListener("click", () => {
   renderStoryboardScriptPicker();

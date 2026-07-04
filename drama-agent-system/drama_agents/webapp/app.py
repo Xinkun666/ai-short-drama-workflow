@@ -27,6 +27,7 @@ from drama_agents.material_splitter import (
 )
 from drama_agents.script_agent import ScriptAgent, parse_manual_storyboard_script, render_script_markdown, text_hash
 from drama_agents.script_assistant import ScriptAssistantController
+from drama_agents.shot_production_agent import ShotProductionAgent
 from drama_agents.storage import MaterialDatabase, current_timestamp, group_visual_scenes
 from drama_agents.storyboard_agent import StoryboardAgent
 from drama_agents.timeline_builder import TimelineBuilder, result_to_payload as timeline_result_to_payload
@@ -53,6 +54,7 @@ def create_app(
     scene_provider=ENV_PROVIDER,
     anchor_provider=ENV_PROVIDER,
     storyboard_provider=ENV_PROVIDER,
+    shot_production_agent=ENV_PROVIDER,
 ) -> Flask:
     package_dir = Path(__file__).parent
     app = Flask(
@@ -98,6 +100,11 @@ def create_app(
         StoryboardAgent.from_environment()
         if storyboard_provider is ENV_PROVIDER
         else StoryboardAgent(storyboard_provider)
+    )
+    production_agent = (
+        ShotProductionAgent.from_environment()
+        if shot_production_agent is ENV_PROVIDER
+        else shot_production_agent
     )
     upload_path.mkdir(parents=True, exist_ok=True)
     output_splits_path.mkdir(parents=True, exist_ok=True)
@@ -614,7 +621,7 @@ def create_app(
             abort(404)
         upload = request.files.get("file")
         if not upload or not upload.filename:
-            return jsonify({"error": "请选择要上传的分镜剧本文件"}), 400
+            return jsonify({"error": "请选择要上传的标准镜头生产稿文件"}), 400
         filename = secure_filename(upload.filename) or "storyboard-script.txt"
         suffix = Path(filename).suffix.lower()
         if suffix not in STORYBOARD_SCRIPT_UPLOAD_EXTENSIONS:
@@ -641,7 +648,7 @@ def create_app(
         try:
             storyboard_script = parse_manual_storyboard_script(
                 raw_text,
-                title=str(script.get("title") or generation.get("topic") or "手动分镜剧本"),
+                title=str(script.get("title") or generation.get("topic") or "手动镜头生产稿"),
             )
             storyboard_script["source_title"] = str(script.get("title") or generation.get("topic") or "")
             storyboard_script["source_article_hash"] = text_hash(str(script.get("article") or ""))
@@ -660,15 +667,25 @@ def create_app(
             abort(404)
         subjects = database.list_script_visual_subjects(generation_id)
         scenes = database.list_script_visual_scenes(generation_id)
-        storyboard_generation, source_type = generation_for_storyboard_agent(generation)
+        storyboard_script = standard_storyboard_script_from_generation(generation)
         try:
-            storyboard_payload = storyboard_agent.generate(
-                generation=storyboard_generation,
-                subjects=subjects,
-                scenes=scenes,
-                target_duration_sec=target_duration_sec,
-                source_type=source_type,
-            )
+            if storyboard_script:
+                storyboard_payload = production_agent.generate(
+                    generation=generation,
+                    storyboard_script=storyboard_script,
+                    subjects=subjects,
+                    scenes=scenes,
+                    output_dir=script_outputs_path / generation_id,
+                )
+            else:
+                storyboard_generation, source_type = generation_for_storyboard_agent(generation)
+                storyboard_payload = storyboard_agent.generate(
+                    generation=storyboard_generation,
+                    subjects=subjects,
+                    scenes=scenes,
+                    target_duration_sec=target_duration_sec,
+                    source_type=source_type,
+                )
             storyboard = database.save_storyboard(generation_id, storyboard_payload)
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 500
@@ -679,7 +696,7 @@ def create_app(
     def extract_storyboard_from_upload():
         file = request.files.get("file")
         if not file or not file.filename:
-            return jsonify({"error": "没有收到上传剧本"}), 400
+            return jsonify({"error": "没有收到上传的标准镜头生产稿"}), 400
         suffix = Path(file.filename).suffix.lower()
         if suffix not in {".txt", ".md", ".markdown", ".json"}:
             return jsonify({"error": "暂只支持 TXT / MD / JSON 剧本文件"}), 400
@@ -690,18 +707,22 @@ def create_app(
             text = destination.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return jsonify({"error": "剧本文件需要是 UTF-8 文本"}), 400
-        target_duration_sec = parse_optional_int(request.form.get("target_duration_sec"))
-        generation = script_generation_from_uploaded_text(destination, text)
+        try:
+            storyboard_script = parse_manual_storyboard_script(text, title=Path(filename).stem)
+        except ValueError as exc:
+            return jsonify({"error": f"请上传标准镜头生产稿（S01｜标题 + 讲述人旁白 + 画面演绎等格式）：{exc}"}), 400
+        generation = script_generation_from_uploaded_text(destination, storyboard_script.get("adapted_article") or text)
+        generation["message"] = "上传标准镜头生产稿已进入镜头生产工作台。"
+        generation["script"]["storyboard_script"] = storyboard_script
+        generation["script"]["article"] = storyboard_script.get("adapted_article") or generation["script"]["article"]
         database = MaterialDatabase(database_path)
         database.save_script_generation(generation)
         try:
-            storyboard_payload = storyboard_agent.generate(
+            storyboard_payload = production_agent.generate(
                 generation=generation,
-                subjects=[],
-                scenes=[],
-                target_duration_sec=target_duration_sec,
-                source_type="upload",
+                storyboard_script=storyboard_script,
                 source_filename=filename,
+                output_dir=script_outputs_path / generation["generation_id"],
             )
             storyboard = database.save_storyboard(generation["generation_id"], storyboard_payload)
         except RuntimeError as exc:
@@ -989,7 +1010,7 @@ def create_app(
         generation = MaterialDatabase(database_path).find_script_generation(generation_id)
         if not generation:
             abort(404)
-        section_title = "分镜剧本阅读器" if section == "storyboard-script" else "剧本阅读器"
+        section_title = "镜头生产稿阅读器" if section == "storyboard-script" else "剧本阅读器"
         return render_template(
             "script_generation_view.html",
             generation=generation,
@@ -1532,6 +1553,15 @@ def raw_reader_payload(chapter: dict) -> dict:
 
 def output_link(path: Path, outputs: Path) -> str:
     return f"/outputs/{path.relative_to(outputs).as_posix()}"
+
+
+def standard_storyboard_script_from_generation(generation: dict) -> dict:
+    script = generation.get("script") if isinstance(generation.get("script"), dict) else {}
+    storyboard_script = script.get("storyboard_script") if isinstance(script.get("storyboard_script"), dict) else {}
+    scene_script = storyboard_script.get("scene_script") if isinstance(storyboard_script.get("scene_script"), list) else []
+    if not scene_script:
+        return {}
+    return storyboard_script
 
 
 def generation_for_storyboard_agent(generation: dict) -> tuple[dict, str]:

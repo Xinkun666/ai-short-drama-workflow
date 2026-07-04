@@ -152,7 +152,7 @@
           <div class="scene-module-tabs" aria-label="场景搭建子模块">
             <button class="scene-module-tab active" type="button" data-scene-tab="subjects">主体池</button>
             <button class="scene-module-tab" type="button" data-scene-tab="scenes">场景池</button>
-            <button class="scene-module-tab" type="button" data-scene-tab="storyboard">剧本分镜</button>
+            <button class="scene-module-tab" type="button" data-scene-tab="storyboard">分镜重构</button>
           </div>
 
           <section class="scene-module-panel active" data-scene-panel="subjects">
@@ -302,22 +302,22 @@
             <div class="storyboard-toolbar">
               <input id="storyboardUploadInput" type="file" accept=".txt,.md,.markdown,.json,text/plain,text/markdown,application/json" hidden>
               <label class="storyboard-script-field" for="storyboardScriptInput">
-                <span>剧本</span>
-                <input id="storyboardScriptInput" type="text" value="" placeholder="未选择剧本" readonly>
+                <span>标准镜头生产稿</span>
+                <input id="storyboardScriptInput" type="text" value="" placeholder="未选择标准稿" readonly>
               </label>
-              <button class="visual-button secondary" id="storyboardUploadButton" type="button">上传剧本</button>
+              <button class="visual-button secondary" id="storyboardUploadButton" type="button">上传标准稿</button>
               <button class="visual-button secondary" id="storyboardSelectButton" type="button">选择剧本</button>
-              <button class="visual-button primary" id="storyboardGenerateButton" type="button">解析</button>
+              <button class="visual-button primary" id="storyboardGenerateButton" type="button">解析生产稿</button>
               <div class="storyboard-toolbar-footer">
-                <div class="visual-status" id="storyboardStatus">请选择已有剧本或上传剧本文本。</div>
+                <div class="visual-status" id="storyboardStatus">请选择已附标准稿的剧本，或上传标准镜头生产稿。</div>
                 <div class="visual-current-script" id="storyboardAssetSummary">主体 0 个 · 场景 0 个</div>
               </div>
               <div class="storyboard-script-picker" id="storyboardScriptPicker" hidden></div>
             </div>
 
-            <section class="storyboard-record-panel" aria-label="分镜记录">
+            <section class="storyboard-record-panel" aria-label="镜头生产记录">
               <div class="records-header">
-                <span>分镜记录</span>
+                <span>镜头生产记录</span>
                 <button class="text-button" id="refreshStoryboardsButton" type="button">刷新</button>
               </div>
               <div class="storyboard-record-list" id="storyboardRecordsList"></div>
